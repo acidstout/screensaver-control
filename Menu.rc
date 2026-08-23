@@ -1,0 +1,79 @@
+/* Menu.rc - tray context menu, German (132) and English (133).
+   Plain ASCII with \x escapes; windres reads it as codepage 1252. */
+#include "resource.h"
+
+/* --------------------------------------------------------------- German */
+IDR_MENU_DE MENU
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+{
+    POPUP "_POPUP_"
+    {
+        MENUITEM "S&tandard Bildschirmschoner starten",  IDM_START_DEFAULT
+        POPUP "Sta&rten"
+        {
+            MENUITEM "(Keine)",  IDM_NONE_RUN,  GRAYED
+        }
+        POPUP "Ein&stellungen"
+        {
+            MENUITEM "(Keine)",  IDM_NONE_CFG,  GRAYED
+        }
+        POPUP "Als Standard &festlegen"
+        {
+            MENUITEM "(Keine)",  IDM_NONE_SET,  GRAYED
+        }
+        MENUITEM SEPARATOR
+        MENUITEM "&Ausschalten",  IDM_DISABLE
+        MENUITEM "&Einschalten",  IDM_ENABLE
+        MENUITEM SEPARATOR
+        MENUITEM "An&zeigeeigenschaften \xF6ffnen",  IDM_DISPLAY
+        MENUITEM SEPARATOR
+        MENUITEM "&Mit Windows starten",  IDM_AUTOSTART
+        POPUP "S&prache"
+        {
+            MENUITEM "&Deutsch",  IDM_LANG_DE
+            MENUITEM "&English",  IDM_LANG_EN
+        }
+        MENUITEM SEPARATOR
+        MENUITEM "&\xDCber...",  IDM_ABOUT
+        MENUITEM SEPARATOR
+        MENUITEM "&Beenden",  IDM_EXIT
+    }
+}
+
+/* -------------------------------------------------------------- English */
+IDR_MENU_EN MENU
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+{
+    POPUP "_POPUP_"
+    {
+        MENUITEM "S&tart default screen saver",  IDM_START_DEFAULT
+        POPUP "&Run"
+        {
+            MENUITEM "(None)",  IDM_NONE_RUN,  GRAYED
+        }
+        POPUP "&Settings"
+        {
+            MENUITEM "(None)",  IDM_NONE_CFG,  GRAYED
+        }
+        POPUP "Set as &default"
+        {
+            MENUITEM "(None)",  IDM_NONE_SET,  GRAYED
+        }
+        MENUITEM SEPARATOR
+        MENUITEM "Turn &off",  IDM_DISABLE
+        MENUITEM "Turn o&n",  IDM_ENABLE
+        MENUITEM SEPARATOR
+        MENUITEM "Open displa&y properties",  IDM_DISPLAY
+        MENUITEM SEPARATOR
+        MENUITEM "Start &with Windows",  IDM_AUTOSTART
+        POPUP "&Language"
+        {
+            MENUITEM "&Deutsch",  IDM_LANG_DE
+            MENUITEM "&English",  IDM_LANG_EN
+        }
+        MENUITEM SEPARATOR
+        MENUITEM "&About...",  IDM_ABOUT
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",  IDM_EXIT
+    }
+}

@@ -1,0 +1,14 @@
+/* scrctl.rc - master resource script; this is the file handed to windres. */
+#include <windows.h>
+#include "resource.h"
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+
+/* IDI_ENABLED must stay resource 1 so it is also the shell icon of the exe. */
+IDI_ENABLED  ICON "icons/enabled.ico"
+IDI_DISABLED ICON "icons/disabled.ico"
+
+#include "Menu.rc"
+#include "About.rc"
+#include "Strings.rc"
+#include "Version_Info.rc"

@@ -1,0 +1,21 @@
+/* Strings.rc - runtime strings, German at IDS_BASE_DE, English at IDS_BASE_EN. */
+#include "resource.h"
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+
+STRINGTABLE
+{
+    IDS_BASE_DE + IDS_NONE       "(Keine)"
+    IDS_BASE_DE + IDS_TIP_ON     "Bildschirmschoner: Eingeschaltet"
+    IDS_BASE_DE + IDS_TIP_OFF    "Bildschirmschoner: Ausgeschaltet"
+    IDS_BASE_DE + IDS_NODEFAULT  "Es ist kein Standard-Bildschirmschoner festgelegt."
+    IDS_BASE_DE + IDS_APPTITLE   "Bildschirmschoner-Steuerung"
+    IDS_BASE_DE + IDS_STARTFAIL  "Der Bildschirmschoner konnte nicht gestartet werden."
+
+    IDS_BASE_EN + IDS_NONE       "(None)"
+    IDS_BASE_EN + IDS_TIP_ON     "Screen saver: On"
+    IDS_BASE_EN + IDS_TIP_OFF    "Screen saver: Off"
+    IDS_BASE_EN + IDS_NODEFAULT  "No default screen saver has been set."
+    IDS_BASE_EN + IDS_APPTITLE   "Screen Saver Control"
+    IDS_BASE_EN + IDS_STARTFAIL  "The screen saver could not be started."
+}

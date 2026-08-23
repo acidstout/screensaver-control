@@ -1,0 +1,47 @@
+/* Version_Info.rc - values taken over unchanged from the supplied original,
+   with an added English (040904B0) translation block. */
+#include "resource.h"
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+
+1 VERSIONINFO
+FILEVERSION    VER_MAJOR, VER_MINOR, VER_REV, VER_BUILD
+PRODUCTVERSION VER_MAJOR, VER_MINOR, VER_REV, VER_BUILD
+FILEFLAGSMASK  0x3FL
+FILEFLAGS      0x0L
+FILEOS         0x4L
+FILETYPE       0x1L
+FILESUBTYPE    0x0L
+{
+    BLOCK "StringFileInfo"
+    {
+        BLOCK "040704B0"
+        {
+            VALUE "CompanyName",      "Rekow IT"
+            VALUE "FileDescription",  "Bildschirmschoner-Steuerung"
+            VALUE "FileVersion",      "1, 0, 0, 0"
+            VALUE "InternalName",     "scrctl"
+            VALUE "LegalCopyright",   "Copyright \xA9 2026 Rekow IT. Alle Rechte vorbehalten."
+            VALUE "LegalTrademarks",  ""
+            VALUE "OriginalFilename", "scrctl.exe"
+            VALUE "ProductName",      "Bildschirmschoner-Steuerung"
+            VALUE "ProductVersion",   "1, 0, 0, 0"
+        }
+        BLOCK "040904B0"
+        {
+            VALUE "CompanyName",      "Rekow IT"
+            VALUE "FileDescription",  "Screensaver Control"
+            VALUE "FileVersion",      "1, 0, 0, 0"
+            VALUE "InternalName",     "scrctl"
+            VALUE "LegalCopyright",   "Copyright \xA9 2026 Rekow IT. All rights reserved."
+            VALUE "LegalTrademarks",  ""
+            VALUE "OriginalFilename", "scrctl.exe"
+            VALUE "ProductName",      "Screensaver Control"
+            VALUE "ProductVersion",   "1, 0, 0, 0"
+        }
+    }
+    BLOCK "VarFileInfo"
+    {
+        VALUE "Translation", 0x0407, 0x04B0, 0x0409, 0x04B0
+    }
+}

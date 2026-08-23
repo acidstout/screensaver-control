@@ -1,0 +1,40 @@
+/* About.rc - "Ueber..." box, German (101) and English (102).
+   Plain DIALOG (not DIALOGEX) so the Windows 95 dialog manager accepts it.
+   "MS Shell Dlg" maps to the correct UI font on every Windows version. */
+#include "resource.h"
+
+/* --------------------------------------------------------------- German */
+IDD_ABOUT_DE DIALOG 0, 0, 261, 198
+STYLE DS_MODALFRAME | DS_SETFONT | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Info"
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+FONT 8, "MS Shell Dlg"
+{
+    ICON            "#1", IDC_ABOUT_ICON, 7, 7, 20, 20
+    LTEXT           "Bildschirmschoner-Steuerung\nVersion " VER_STR "\nF\xFCr Windows\xAE 95/98/ME/NT4/2000/XP/2003/7/8/10/11",
+                    IDC_ABOUT_TEXT, 38, 7, 216, 27
+    LTEXT           "Copyright \xA9 2026 Rekow IT, Switzerland. Alle Rechte vorbehalten.",
+                    IDC_ABOUT_COPY, 38, 37, 216, 26
+    LTEXT           "Warnung: Dieses Computerprogramm ist durch Copyright und internationale Abkommen urheberrechtlich gesch\xFCtzt. Unerlaubte Reproduktion oder Weitergabe dieses Programms oder jeglichem Inhalt davon, kann in zivil- und strafrechtlichen Schritten resultieren.",
+                    IDC_ABOUT_WARN, 38, 71, 216, 33
+    LTEXT           "Besuchen Sie uns im Internet!", IDC_ABOUT_LINK, 38, 183, 120, 8, SS_NOTIFY
+    DEFPUSHBUTTON   "OK", IDOK, 207, 177, 47, 14
+}
+
+/* -------------------------------------------------------------- English */
+IDD_ABOUT_EN DIALOG 0, 0, 261, 198
+STYLE DS_MODALFRAME | DS_SETFONT | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "About"
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+FONT 8, "MS Shell Dlg"
+{
+    ICON            "#1", IDC_ABOUT_ICON, 7, 7, 20, 20
+    LTEXT           "Screen Saver Control\nVersion " VER_STR "\nFor Windows\xAE 95/98/ME/NT4/2000/XP/2003/7/8/10/11",
+                    IDC_ABOUT_TEXT, 38, 7, 216, 27
+    LTEXT           "Copyright \xA9 2026 Rekow IT, Switzerland. All rights reserved.",
+                    IDC_ABOUT_COPY, 38, 37, 216, 26
+    LTEXT           "Warning: This computer program is protected by copyright law and international treaties. Unauthorized reproduction or distribution of this program, or any portion of it, may result in severe civil and criminal penalties.",
+                    IDC_ABOUT_WARN, 38, 71, 216, 33
+    LTEXT           "Visit us on the web!", IDC_ABOUT_LINK, 38, 183, 120, 8, SS_NOTIFY
+    DEFPUSHBUTTON   "OK", IDOK, 207, 177, 47, 14
+}

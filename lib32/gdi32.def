@@ -1,0 +1,4 @@
+LIBRARY "gdi32.dll"
+EXPORTS
+SetBkMode@8
+SetTextColor@8
