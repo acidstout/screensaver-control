@@ -4,7 +4,7 @@ A native Win32 tray applet that shows and controls the state of the default
 Windows screen saver. 32-bit, no C runtime, no external dependencies —
 runs on every 32-bit Windows from **Windows 95** through **Windows 11**.
 
-`build\scrctl.exe` — **66,560 bytes**, of which ~48 KB is the two icons;
+`build\scrctl.exe` — **77,824 bytes**, of which ~62 KB is the two icons;
 code + data is about 13 KB.
 
 ## Features
@@ -89,7 +89,7 @@ scrctl.rc             master resource script (the one handed to windres)
   Version_Info.rc     VERSIONINFO, DE + EN string blocks
 icons/                enabled.ico, disabled.ico (supplied, unmodified)
 lib32/                generated 32-bit import libraries
-tools/                genimportlibs.sh
+tools/                genimportlibs.sh, depng_ico.py
 ```
 
 ## Windows 95 compatibility rules
@@ -119,6 +119,3 @@ Breaking any of these silently drops Win9x support:
   reliably on modern versions of Windows. Stardust Software is defunct and their
   site is gone. None of the original code was used — this binary is ~66 KB and
   shares nothing with it but the idea. Intended for release as open source.
-- Shrinking the exe further is almost entirely a matter of the icons — they
-  are ~48 KB of the 66 KB. Dropping unused sizes or colour depths from the two
-  `.ico` files is where any remaining savings are.

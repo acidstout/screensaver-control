@@ -12,6 +12,9 @@
  *   - No API newer than shell32/comctl32 4.0 (so: no CheckMenuRadioItem,
  *     no NIM_SETVERSION, no SHGetFolderPath, no shlwapi).
  *   - version.dll is bound late so its absence degrades instead of failing.
+ *   - The .ico files must hold classic BMP/DIB images only.  PNG-compressed
+ *     icon entries are a Vista-and-later feature and are not icons at all to
+ *     95/98/ME/2000/XP.  Run tools/depng_ico.py over any re-exported icon.
  * ---------------------------------------------------------------------- */
 
 #define WIN32_LEAN_AND_MEAN
@@ -23,6 +26,7 @@
 #define WM_TRAYICON   (WM_APP + 1)
 #define IDT_REFRESH   1
 #define REFRESH_MS    2000
+#define PROBE_TICKS   15            /* re-verify the icon every 30 s      */
 #define MAX_SAVERS    256
 #define MENU_BREAK_AT 28            /* start a new menu column after N items */
 #define NAME_MAX_CHARS 52           /* clamp over-long FileDescription strings   */
@@ -419,6 +423,10 @@ static void TrayFill(NOTIFYICONDATAA *nid, BOOL withData)
         nid->uCallbackMessage = WM_TRAYICON;
         nid->hIcon = LoadIconA(g_hInst, MAKEINTRESOURCEA(
                          g_bActive ? IDI_ENABLED : IDI_DISABLED));
+        /* Shell_NotifyIcon rejects the whole call for a NULL hIcon, which
+           would cost us the icon entirely; a stock icon is far better. */
+        if (!nid->hIcon)
+            nid->hIcon = LoadIconA(NULL, IDI_APPLICATION);
         lstrcpynA(nid->szTip, Str(g_bActive ? IDS_TIP_ON : IDS_TIP_OFF), 64);
     }
 }
@@ -448,6 +456,51 @@ static void TrayRemove(void)
 }
 
 /* Re-read the state and repaint the icon only when it actually changed. */
+/* Keep the icon present.  Cheap enough to call on every timer tick.
+
+   This exists because a single lost NIM_ADD used to be permanent: the only
+   other caller of TrayAdd was TrayUpdate, which ran only when the screen
+   saver's on/off state actually changed, so the program would sit there
+   running with no icon at all.  NIM_ADD does fail in practice - most easily
+   when we are started from the Run key at logon and the shell has not created
+   the notification area yet.  Retrying every tick costs nothing and makes the
+   icon appear as soon as the tray is ready.
+
+   The shell can also drop an icon silently (a tray rebuild whose
+   TaskbarCreated broadcast we missed).  There is no way to ask whether our
+   icon is still there, so probe with a NIM_MODIFY now and then: if it fails,
+   the icon is gone and has to be added again. */
+static void TrayEnsure(void)
+{
+    static UINT probe   = 0;
+    static BOOL settled = FALSE;
+    NOTIFYICONDATAA nid;
+
+    if (!g_bIconOk) {
+        TrayAdd();
+        probe = 0;
+        settled = FALSE;
+        return;
+    }
+
+    /* Probe on every tick until one probe has actually succeeded, and only
+       then settle into an occasional check.  NIM_ADD can report success while
+       the shell quietly drops the icon - which is what happens when we start
+       before the notification area is ready - so a success from NIM_ADD is
+       not proof that the icon exists.  A successful NIM_MODIFY is. */
+    if (settled && ++probe < PROBE_TICKS) return;
+    probe = 0;
+
+    TrayFill(&nid, TRUE);
+    if (Shell_NotifyIconA(NIM_MODIFY, &nid)) {
+        settled = TRUE;
+    } else {
+        settled = FALSE;
+        g_bIconOk = FALSE;
+        TrayAdd();
+    }
+}
+
 static void RefreshState(BOOL force)
 {
     BOOL now = SaverIsActive();
@@ -726,13 +779,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 
     switch (msg) {
     case WM_CREATE:
+        /* No Shell_NotifyIcon here: the window is not fully created yet while
+           WM_CREATE runs, and the shell can accept the icon and then drop it.
+           The icon is added once CreateWindowEx has returned. */
         g_bActive = SaverIsActive();
-        TrayAdd();
         SetTimer(hWnd, IDT_REFRESH, REFRESH_MS, NULL);
         return 0;
 
     case WM_TIMER:
-        if (wp == IDT_REFRESH) RefreshState(FALSE);
+        if (wp == IDT_REFRESH) {
+            TrayEnsure();          /* re-add a lost or never-added icon */
+            RefreshState(FALSE);
+        }
         return 0;
 
     case WM_WININICHANGE:               /* == WM_SETTINGCHANGE on NT */
@@ -796,6 +854,9 @@ void __cdecl WinMainCRTStartup(void)
     g_hWnd = CreateWindowExA(WS_EX_TOOLWINDOW, CLASSNAME, Str(IDS_APPTITLE), WS_POPUP,
                              0, 0, 0, 0, NULL, NULL, g_hInst, NULL);
     if (!g_hWnd) ExitProcess(1);
+
+    g_bActive = SaverIsActive();
+    TrayAdd();          /* if this is dropped, the timer notices and retries */
 
     while (GetMessageA(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
