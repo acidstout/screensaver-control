@@ -7,6 +7,7 @@ FindClose@4
 FindFirstFileA@8
 FindNextFileA@8
 FreeLibrary@4
+GetFileAttributesA@4
 GetModuleFileNameA@12
 GetModuleHandleA@4
 GetProcAddress@8
@@ -14,8 +15,10 @@ GetSystemDirectoryA@8
 GetUserDefaultLangID@0
 GetWindowsDirectoryA@8
 LoadLibraryA@4
+LoadLibraryExA@12
 LocalAlloc@8
 LocalFree@4
+WideCharToMultiByte@32
 lstrcatA@8
 lstrcmpiA@8
 lstrcpynA@12

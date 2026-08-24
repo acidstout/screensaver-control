@@ -1,4 +1,14 @@
 LIBRARY "gdi32.dll"
 EXPORTS
+CreateFontIndirectA@4
+CreatePen@12
+CreateSolidBrush@4
+DeleteObject@4
+GetStockObject@4
+GetTextExtentPoint32A@16
+LineTo@12
+MoveToEx@16
+SelectObject@8
+SetBkColor@8
 SetBkMode@8
 SetTextColor@8

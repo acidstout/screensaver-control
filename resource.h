@@ -4,10 +4,10 @@
 
 /* ---- version ---------------------------------------------------------- */
 #define VER_MAJOR   1
-#define VER_MINOR   0
+#define VER_MINOR   1
 #define VER_REV     0
 #define VER_BUILD   0
-#define VER_STR     "1.0.0.0"
+#define VER_STR     "1.1.0.0"
 
 /* Homepage opened by the link in the About box. Change to taste. */
 #define APP_URL     "https://www.rekow.ch"
@@ -48,6 +48,7 @@
 #define IDM_NONE_SET      32788
 #define IDM_LANG_DE       32790
 #define IDM_LANG_EN       32791
+#define IDM_DARKMODE      32792
 
 /* ---- dynamic command ranges ------------------------------------------- */
 #define IDR_RUN_BASE      40000

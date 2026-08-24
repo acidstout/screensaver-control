@@ -37,8 +37,9 @@
 #define RUN_VALUE     "ScreensaverControl"   /* language independent */
 
 typedef struct {
-    char file[MAX_PATH];            /* full path of the .scr                */
-    char name[128];                 /* display name (FileDescription)       */
+    char file[MAX_PATH];            /* canonical path - what the registry gets */
+    char name[128];                 /* display name shown in the menu          */
+    BYTE native;                    /* lives in the native System32 (see below)*/
 } SAVER;
 
 static HINSTANCE g_hInst;
@@ -188,16 +189,45 @@ static void SetDefaultSaver(const char *path)
                         (LPARAM)"WindowsMetrics", SMTO_ABORTIFHUNG, 1000, &res);
 }
 
+/* Turn a recorded "%WINDIR%\System32\x.scr" into something this 32-bit
+   process can actually open, i.e. the Sysnative alias.  Only rewrites a path
+   that really is in System32 and really is missing from our point of view, so
+   it is a no-op everywhere except under WOW64. */
+static void FixupLaunchPath(char *path, int cb)
+{
+    char win[MAX_PATH], cand[MAX_PATH];
+
+    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) return;
+
+    win[0] = 0;
+    if (!GetWindowsDirectoryA(win, sizeof(win)) || !win[0]) return;
+
+    lstrcpynA(cand, win, MAX_PATH);
+    lstrcatA(cand, "\\System32\\");
+    lstrcatA(cand, BaseName(path));
+    if (lstrcmpiA(cand, path) != 0) return;         /* not a System32 path */
+
+    lstrcpynA(cand, win, MAX_PATH);
+    lstrcatA(cand, "\\Sysnative\\");
+    lstrcatA(cand, BaseName(path));
+    if (GetFileAttributesA(cand) != INVALID_FILE_ATTRIBUTES)
+        lstrcpynA(path, cand, cb);
+}
+
 /* Launch a .scr with the given switch ("/s" = show, "/c" = configure). */
 static BOOL RunSaver(const char *path, const char *sw)
 {
     char                cmd[MAX_PATH + 16];
     char                dir[MAX_PATH];
+    char                real[MAX_PATH];
     STARTUPINFOA        si;
     PROCESS_INFORMATION pi;
 
+    lstrcpynA(real, path, MAX_PATH);
+    FixupLaunchPath(real, MAX_PATH);
+
     cmd[0] = '"';
-    lstrcpynA(cmd + 1, path, MAX_PATH);
+    lstrcpynA(cmd + 1, real, MAX_PATH);
     lstrcatA(cmd, "\" ");
     lstrcatA(cmd, sw);
 
@@ -297,6 +327,62 @@ static BOOL SaverDisplayName(const char *path, char *out, int cb)
     return ok;
 }
 
+/* The name Windows itself shows for a screen saver is *string resource 1*.
+   That is the scrnsave.lib IDS_DESCRIPTION convention and the Display control
+   panel has read it since Windows 95.  Version info is only a fallback: for
+   the built-in savers FileDescription is a whole sentence
+   ("Bildschirmschoner \"Seifenblasen\"") where string 1 is the actual name
+   ("Seifenblasen").  LOAD_LIBRARY_AS_DATAFILE maps the file without running a
+   line of its code, and reads resources out of a 64-bit .scr just fine. */
+static BOOL SaverNameFromString(const char *path, char *out, int cb)
+{
+    HMODULE h;
+    int     n, i;
+
+    h = LoadLibraryExA(path, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (!h) return FALSE;
+    out[0] = 0;
+    n = LoadStringA(h, 1, out, cb);
+    FreeLibrary(h);
+    if (n <= 0) return FALSE;
+
+    /* Savers pad this string surprisingly often. */
+    for (i = lstrlenA(out) - 1; i >= 0 && (out[i] == ' ' || out[i] == '	'); i--)
+        out[i] = 0;
+    for (i = 0; out[i] == ' ' || out[i] == '	'; i++) ;
+    if (i) {
+        int j = 0;
+        while (out[i]) out[j++] = out[i++];
+        out[j] = 0;
+    }
+    return out[0] != 0;
+}
+
+/* Best display name for a .scr, in the order Windows would pick it. */
+static void ResolveName(const char *path, const char *fileName,
+                        char *out, int cb)
+{
+    int i;
+
+    if (!SaverNameFromString(path, out, cb) &&
+        !SaverDisplayName(path, out, cb))
+        out[0] = 0;
+
+    /* A missing name, or a FileDescription that is really a paragraph, is
+       less use than the plain file name. */
+    if (!out[0] || lstrlenA(out) > NAME_MAX_CHARS) {
+        lstrcpynA(out, fileName, cb);
+        for (i = lstrlenA(out) - 1; i > 0; i--)
+            if (out[i] == '.') { out[i] = 0; break; }
+    }
+    if (lstrlenA(out) > NAME_MAX_CHARS) {
+        out[NAME_MAX_CHARS - 3] = '.';
+        out[NAME_MAX_CHARS - 2] = '.';
+        out[NAME_MAX_CHARS - 1] = '.';
+        out[NAME_MAX_CHARS]     = 0;
+    }
+}
+
 static BOOL AlreadyHave(const char *file)
 {
     int i;
@@ -306,15 +392,19 @@ static BOOL AlreadyHave(const char *file)
     return FALSE;
 }
 
-static void ScanDir(const char *dir)
+/* Search searchDir for *.scr but record each hit as living in recordDir.
+   The two differ only for the Sysnative alias - see EnumSavers. */
+static void ScanDir(const char *searchDir, const char *recordDir, BOOL native)
 {
     char             pat[MAX_PATH];
     WIN32_FIND_DATAA fd;
     HANDLE           h;
     int              n;
 
-    if (!dir || !dir[0]) return;
-    lstrcpynA(pat, dir, MAX_PATH);
+    if (!searchDir || !searchDir[0]) return;
+    if (!recordDir || !recordDir[0]) recordDir = searchDir;
+
+    lstrcpynA(pat, searchDir, MAX_PATH);
     n = lstrlenA(pat);
     if (n && pat[n - 1] != '\\') lstrcatA(pat, "\\");
     lstrcatA(pat, "*.scr");
@@ -324,31 +414,29 @@ static void ScanDir(const char *dir)
 
     do {
         SAVER *s;
+        char   probe[MAX_PATH];
+
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         if (g_nSavers >= MAX_SAVERS) break;
         if (AlreadyHave(fd.cFileName)) continue;
 
         s = &g_savers[g_nSavers];
-        lstrcpynA(s->file, dir, MAX_PATH);
+        s->native = (BYTE)(native ? 1 : 0);
+
+        /* Path we record (and hand to the registry). */
+        lstrcpynA(s->file, recordDir, MAX_PATH);
         n = lstrlenA(s->file);
         if (n && s->file[n - 1] != '\\') lstrcatA(s->file, "\\");
         lstrcatA(s->file, fd.cFileName);
 
-        if (!SaverDisplayName(s->file, s->name, sizeof(s->name))) {
-            /* Fall back to the file name without its extension. */
-            int i;
-            lstrcpynA(s->name, fd.cFileName, sizeof(s->name));
-            for (i = lstrlenA(s->name) - 1; i > 0; i--)
-                if (s->name[i] == '.') { s->name[i] = 0; break; }
-        }
+        /* Path we can actually open right now, to read the name from. */
+        lstrcpynA(probe, searchDir, MAX_PATH);
+        n = lstrlenA(probe);
+        if (n && probe[n - 1] != '\\') lstrcatA(probe, "\\");
+        lstrcatA(probe, fd.cFileName);
+
+        ResolveName(probe, fd.cFileName, s->name, sizeof(s->name));
         if (!s->name[0]) continue;
-        if (lstrlenA(s->name) > NAME_MAX_CHARS) {
-            /* Some savers put a whole sentence in FileDescription. */
-            s->name[NAME_MAX_CHARS - 3] = '.';
-            s->name[NAME_MAX_CHARS - 2] = '.';
-            s->name[NAME_MAX_CHARS - 1] = '.';
-            s->name[NAME_MAX_CHARS]     = 0;
-        }
         g_nSavers++;
     } while (FindNextFileA(h, &fd));
 
@@ -370,6 +458,7 @@ static void SortSavers(void)
 static void EnumSavers(void)
 {
     char dir[MAX_PATH];
+    char win[MAX_PATH];
     char cur[MAX_PATH];
     int  i;
 
@@ -382,15 +471,38 @@ static void EnumSavers(void)
         if (!g_savers) return;
     }
 
-    dir[0] = 0; GetSystemDirectoryA(dir, sizeof(dir));  ScanDir(dir);
-    dir[0] = 0; GetWindowsDirectoryA(dir, sizeof(dir)); ScanDir(dir);
+    /* On 64-bit Windows a 32-bit process is file-redirected: everything we
+       ask for in "...\System32\\" is actually served out of SysWOW64.  So
+       GetSystemDirectory gives us the 32-bit savers and the *native* System32
+       - where Bubbles, Mystify, Ribbons and 3D Text live - stays invisible.
+       The "Sysnative" alias is the way out; it exists only for 32-bit
+       processes under WOW64, so on a 32-bit Windows (or on 9x) the directory
+       simply is not there and the scan finds nothing.  No version check
+       needed.
+
+       Sysnative is meaningless to the 64-bit shell, so these entries are
+       *recorded* under their real System32 name - that is what has to end up
+       in SCRNSAVE.EXE - and mapped back to Sysnative only when we open or
+       launch them.  Native first, so it wins the de-duplication against the
+       SysWOW64 copy of the same saver, exactly as the Control Panel does. */
+    win[0] = 0;
+    GetWindowsDirectoryA(win, sizeof(win));
+    if (win[0]) {
+        char nat[MAX_PATH], rec[MAX_PATH];
+        lstrcpynA(nat, win, MAX_PATH); lstrcatA(nat, "\\Sysnative");
+        lstrcpynA(rec, win, MAX_PATH); lstrcatA(rec, "\\System32");
+        ScanDir(nat, rec, TRUE);
+    }
+
+    dir[0] = 0; GetSystemDirectoryA(dir, sizeof(dir));  ScanDir(dir, dir, FALSE);
+    if (win[0]) ScanDir(win, win, FALSE);
 
     /* A saver configured from somewhere else must still show up. */
     if (GetDefaultSaver(cur, sizeof(cur)) && !AlreadyHave(BaseName(cur))) {
         const char *b = BaseName(cur);
         if (b > cur) {
             lstrcpynA(dir, cur, (int)(b - cur));   /* strips the backslash */
-            ScanDir(dir);
+            ScanDir(dir, dir, FALSE);
         }
     }
 
@@ -590,6 +702,443 @@ static void SetLanguage(BOOL english)
 }
 
 /* ======================================================================= */
+/*  dark mode                                                              */
+/* ======================================================================= */
+
+/* Windows only grew a way to darken menus in Windows 10 1809, and even there
+   it is undocumented uxtheme ordinals.  Owner-drawn menu items, by contrast,
+   behave identically from Windows 95 onwards, so that is what this uses.
+   Items are converted to MF_OWNERDRAW only while dark mode is on - in light
+   mode the menu is left exactly as the system draws it, so the native look is
+   never second-guessed. */
+
+#define DARK_BG      RGB( 43,  43,  43)
+#define DARK_BGSEL   RGB( 72,  72,  72)
+#define DARK_TEXT    RGB(240, 240, 240)
+#define DARK_DIS     RGB(120, 120, 120)
+#define DARK_SEP     RGB( 78,  78,  78)
+#define DARK_DLGBG   RGB( 32,  32,  32)
+#define DARK_LINK    RGB(105, 170, 255)
+
+#define ITEM_CHECKW  22             /* width of the check column, in pixels */
+#define ITEM_ARROWW  14             /* room kept for a submenu arrow        */
+#define ARROW_INSET  10             /* chevron tip, in from the item edge   */
+#define ITEM_PADX     8
+#define ITEM_PADY     6
+#define ITEM_SEPH     7
+#define DARK_BORDER  RGB( 80,  80,  80)
+#define BORDER_W      2             /* matches the frame Windows draws      */
+#define MAX_ARROWS   48
+
+/* Windows paints the submenu arrows and the popup's border *after* it has
+   asked us to draw the items, so neither can be touched from WM_DRAWITEM -
+   the system arrow simply lands on top of anything we put there.  The way in
+   is to repaint once the whole pass is over: WM_DRAWITEM records what needs
+   fixing and posts WM_FIXMENU to ourselves.  TrackPopupMenu runs a modal loop
+   that still dispatches to our window, so the message is handled the moment
+   the paint finishes.  No subclassing of the system menu window required. */
+#define WM_FIXMENU   (WM_APP + 2)
+
+typedef struct {
+    char text[100];
+    BYTE isSep;
+    BYTE isPopup;
+} MITEM;
+
+#define MAX_MITEMS   (3 * MAX_SAVERS + 40)
+
+static BOOL    g_bDark;
+static MITEM  *g_items;             /* owner-draw item pool, lazily made   */
+static int     g_nMItems;
+
+/* Arrow zones of the popup window currently being painted. */
+static HWND    g_menuWnd;
+static int     g_nArrows;
+static BOOL    g_fixPending;
+static struct { RECT r; COLORREF bg; } g_arrows[MAX_ARROWS];
+
+/* The real menu font, so owner-drawn items match everything else on screen.
+   NONCLIENTMETRICS grew a field in Vista; try the current size, then the
+   pre-Vista one, before falling back to the stock GUI font. */
+static HFONT MenuFont(void)
+{
+    static HFONT      f = NULL;
+    static BOOL       tried = FALSE;
+    NONCLIENTMETRICSA ncm;
+
+    if (!tried) {
+        tried = TRUE;
+        Zero(&ncm, sizeof(ncm));
+        ncm.cbSize = sizeof(ncm);
+        if (!SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
+            Zero(&ncm, sizeof(ncm));
+            ncm.cbSize = sizeof(ncm) - sizeof(int);
+            if (!SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &ncm, 0))
+                ncm.cbSize = 0;
+        }
+        if (ncm.cbSize) f = CreateFontIndirectA(&ncm.lfMenuFont);
+    }
+    return f ? f : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+}
+
+/* Windows 10 2004 and later can darken the title bar too.  Bound late, so it
+   is simply absent - and harmless - everywhere else. */
+static void DarkenCaption(HWND hWnd, BOOL dark)
+{
+    typedef LONG (WINAPI *PFNDWMSET)(HWND, DWORD, LPCVOID, DWORD);
+    HMODULE   dwm;
+    PFNDWMSET set;
+    BOOL      on = dark ? TRUE : FALSE;
+
+    dwm = LoadLibraryA("dwmapi.dll");
+    if (!dwm) return;
+    set = (PFNDWMSET)(void *)GetProcAddress(dwm, "DwmSetWindowAttribute");
+    if (set) {
+        /* 20 is DWMWA_USE_IMMERSIVE_DARK_MODE; it was 19 on the first builds. */
+        if (set(hWnd, 20, &on, sizeof(on)) != 0)
+            set(hWnd, 19, &on, sizeof(on));
+    }
+    FreeLibrary(dwm);
+}
+
+/* GetMenuStringA truncates by *character* count rather than by buffer size.
+   On a system whose ANSI codepage is UTF-8 - Windows 10's "Beta: Use Unicode
+   UTF-8 for worldwide language support" - every non-ASCII character therefore
+   costs one byte off the end: "Anzeigeeigenschaften oeffnen" comes back one
+   character short.  Where GetMenuStringW exists (every NT) take the wide
+   string and do the conversion here, sized in bytes.  Windows 9x has no W
+   entry point, but its ANSI codepage can never be UTF-8, so the A path is
+   exact there. */
+static void MenuItemText(HMENU hMenu, int pos, char *out, int cb)
+{
+    typedef int (WINAPI *PFNGMSW)(HMENU, UINT, LPWSTR, int, UINT);
+    static PFNGMSW getW  = NULL;
+    static BOOL    ready = FALSE;
+    WCHAR w[160];
+
+    out[0] = 0;
+    if (!ready) {
+        ready = TRUE;
+        getW = (PFNGMSW)(void *)GetProcAddress(GetModuleHandleA("user32.dll"),
+                                               "GetMenuStringW");
+    }
+    if (getW) {
+        if (getW(hMenu, (UINT)pos, w, 160, MF_BYPOSITION) > 0 &&
+            WideCharToMultiByte(CP_ACP, 0, w, -1, out, cb, NULL, NULL) > 0)
+            return;
+        out[0] = 0;
+    }
+    GetMenuStringA(hMenu, (UINT)pos, out, cb, MF_BYPOSITION);
+}
+
+/* The light frame around a dark popup is two different things: a 1px window
+   border, and 2px of the menu's own client background that the item rects do
+   not cover.  The background is what actually reads as a thick light edge,
+   and MIM_BACKGROUND replaces it outright.  SetMenuInfo arrived in Windows
+   2000, so it is bound late; Windows 9x menus have no such padding to fix. */
+static void MenuDarkBackground(HMENU hMenu)
+{
+    typedef BOOL (WINAPI *PFNSETMENUINFO)(HMENU, LPCMENUINFO);
+    static PFNSETMENUINFO setInfo = NULL;
+    static BOOL           ready   = FALSE;
+    static HBRUSH         brBack  = NULL;
+    MENUINFO mi;
+
+    if (!ready) {
+        ready = TRUE;
+        setInfo = (PFNSETMENUINFO)(void *)GetProcAddress(
+                      GetModuleHandleA("user32.dll"), "SetMenuInfo");
+        brBack = CreateSolidBrush(DARK_BG);
+    }
+    if (!setInfo || !brBack) return;
+
+    Zero(&mi, sizeof(mi));
+    mi.cbSize  = sizeof(mi);
+    mi.fMask   = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
+    mi.hbrBack = brBack;
+    setInfo(hMenu, &mi);
+}
+
+/* Convert one popup, and everything below it, to owner-drawn items. */
+static void MenuGoDark(HMENU hMenu)
+{
+    int i, n;
+
+    if (!g_items) {
+        g_items = (MITEM *)LocalAlloc(LPTR, MAX_MITEMS * sizeof(MITEM));
+        if (!g_items) return;
+    }
+
+    n = GetMenuItemCount(hMenu);
+    for (i = 0; i < n; i++) {
+        UINT     st = GetMenuState(hMenu, i, MF_BYPOSITION);
+        MITEM   *it;
+        UINT     flags;
+        UINT_PTR target;
+
+        if (g_nMItems >= MAX_MITEMS) return;
+        it = &g_items[g_nMItems++];
+
+        /* For an item that opens a submenu, GetMenuState returns the submenu's
+           item count in the high byte and only the flags in the low byte.
+           MF_SEPARATOR is 0x800 - inside that high byte - so a popup with 8 or
+           more entries reads back as a separator and would be drawn as a bare
+           line.  Never trust the high-byte flags on a popup. */
+        it->isPopup = (BYTE)((st & MF_POPUP) ? 1 : 0);
+        it->isSep   = (BYTE)((!it->isPopup && (st & MF_SEPARATOR)) ? 1 : 0);
+        it->text[0] = 0;
+        if (!it->isSep)
+            MenuItemText(hMenu, i, it->text, sizeof(it->text));
+
+        /* Rebuild the flags from what we established rather than masking the
+           raw value, for the same reason. */
+        flags = MF_BYPOSITION | MF_OWNERDRAW;
+        if (st & MF_GRAYED)       flags |= MF_GRAYED;
+        if (st & MF_DISABLED)     flags |= MF_DISABLED;
+        if (st & MF_CHECKED)      flags |= MF_CHECKED;
+        if (st & MF_MENUBARBREAK) flags |= MF_MENUBARBREAK;
+        if (st & MF_MENUBREAK)    flags |= MF_MENUBREAK;
+        if (it->isPopup)     flags |= MF_POPUP;
+        else if (it->isSep)  flags |= MF_SEPARATOR;
+
+        if (it->isPopup) {
+            HMENU sub = GetSubMenu(hMenu, i);
+            MenuGoDark(sub);                       /* depth first */
+            target = (UINT_PTR)sub;
+        } else {
+            target = GetMenuItemID(hMenu, i);
+        }
+        ModifyMenuA(hMenu, i, flags, target, (LPCSTR)it);
+    }
+}
+
+/* Both glyphs are matched to what the themed light menu draws, measured off a
+   screenshot: the check is 10x7 at a 2px stroke, the chevron 4x7 at 1px and
+   ARROW_INSET in from the right edge of the item.  Keeping the two modes
+   geometrically identical matters more than picking prettier numbers. */
+static void DrawCheck(HDC dc, const RECT *r, COLORREF col)
+{
+    HPEN pen, old;
+    int  cx = (r->left + r->right) / 2;
+    int  cy = (r->top + r->bottom) / 2;
+
+    pen = CreatePen(PS_SOLID, 2, col);
+    if (!pen) return;
+    old = (HPEN)SelectObject(dc, pen);
+    MoveToEx(dc, cx - 5, cy, NULL);
+    LineTo(dc, cx - 2, cy + 3);
+    LineTo(dc, cx + 4, cy - 3);
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+/* A chevron the same size and in the same place as the themed light menu's:
+   4 wide, 7 tall, 1px stroke, tip ARROW_INSET in from the item's right edge.
+   GDI leaves the final point of a LineTo undrawn, so the last segment
+   deliberately overshoots by one step to make the bottom pixel appear. */
+static void DrawArrow(HDC dc, const RECT *r, COLORREF col)
+{
+    HPEN pen;
+    HGDIOBJ old;
+    int  x = r->right - ARROW_INSET;          /* tip of the chevron */
+    int  y = (r->top + r->bottom) / 2;
+
+    pen = CreatePen(PS_SOLID, 1, col);
+    if (!pen) return;
+    old = SelectObject(dc, pen);
+    MoveToEx(dc, x - 3, y - 3, NULL);
+    LineTo(dc, x, y);
+    LineTo(dc, x - 4, y + 4);                 /* overshoot: draws (x-3, y+3) */
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+/* Repaint the bits Windows draws after us: the popup's light frame, and the
+   black submenu arrows it stamps over whatever the item draw left behind. */
+static void FixMenuChrome(HWND hMenuWnd)
+{
+    HDC    dc;
+    HBRUSH br;
+    RECT   rc;
+    int    i;
+
+    if (!hMenuWnd || !IsWindow(hMenuWnd)) return;
+
+    /* Border: the frame lives outside the client area, so it needs a window DC. */
+    dc = GetWindowDC(hMenuWnd);
+    if (dc) {
+        GetWindowRect(hMenuWnd, &rc);
+        rc.right  -= rc.left;
+        rc.bottom -= rc.top;
+        rc.left = rc.top = 0;
+        br = CreateSolidBrush(DARK_BORDER);
+        if (br) {
+            for (i = 0; i < BORDER_W; i++) {
+                FrameRect(dc, &rc, br);
+                rc.left++; rc.top++; rc.right--; rc.bottom--;
+            }
+            DeleteObject(br);
+        }
+        ReleaseDC(hMenuWnd, dc);
+    }
+
+    /* Arrows: client coordinates, same space the item rects came in. */
+    if (!g_nArrows) return;
+    dc = GetDC(hMenuWnd);
+    if (!dc) return;
+    for (i = 0; i < g_nArrows; i++) {
+        RECT a = g_arrows[i].r;
+        a.left = a.right - ITEM_ARROWW;
+        br = CreateSolidBrush(g_arrows[i].bg);
+        if (br) { FillRect(dc, &a, br); DeleteObject(br); }
+        DrawArrow(dc, &g_arrows[i].r, DARK_TEXT);
+    }
+    ReleaseDC(hMenuWnd, dc);
+}
+
+static void OnMeasureItem(MEASUREITEMSTRUCT *mis)
+{
+    MITEM  *it = (MITEM *)mis->itemData;
+    HDC     dc;
+    HGDIOBJ old;
+    SIZE    sz;
+
+    if (mis->CtlType != ODT_MENU || !it) return;
+
+    if (it->isSep) {
+        mis->itemWidth  = 0;
+        mis->itemHeight = ITEM_SEPH;
+        return;
+    }
+
+    dc = GetDC(NULL);
+    if (!dc) { mis->itemWidth = 120; mis->itemHeight = 20; return; }
+    old = SelectObject(dc, MenuFont());
+    sz.cx = 0; sz.cy = 0;
+    GetTextExtentPoint32A(dc, it->text, lstrlenA(it->text), &sz);
+    SelectObject(dc, old);
+    ReleaseDC(NULL, dc);
+
+    mis->itemWidth  = sz.cx + ITEM_CHECKW + ITEM_ARROWW + ITEM_PADX;
+    mis->itemHeight = sz.cy + ITEM_PADY;
+    if (mis->itemHeight < 18) mis->itemHeight = 18;
+}
+
+static void OnDrawItem(DRAWITEMSTRUCT *dis)
+{
+    MITEM   *it = (MITEM *)dis->itemData;
+    HBRUSH   br;
+    HGDIOBJ  old;
+    RECT     r, tr;
+    COLORREF fg;
+
+    if (dis->CtlType != ODT_MENU || !it) return;
+
+    r = dis->rcItem;
+
+    br = CreateSolidBrush((dis->itemState & ODS_SELECTED) ? DARK_BGSEL : DARK_BG);
+    if (br) { FillRect(dis->hDC, &r, br); DeleteObject(br); }
+
+    if (it->isSep) {
+        RECT s;
+        s.left   = r.left + 4;
+        s.right  = r.right - 4;
+        s.top    = (r.top + r.bottom) / 2;
+        s.bottom = s.top + 1;
+        br = CreateSolidBrush(DARK_SEP);
+        if (br) { FillRect(dis->hDC, &s, br); DeleteObject(br); }
+        return;
+    }
+
+    fg = (dis->itemState & (ODS_GRAYED | ODS_DISABLED)) ? DARK_DIS : DARK_TEXT;
+
+    if (dis->itemState & ODS_CHECKED) {
+        RECT c = r;
+        c.right = c.left + ITEM_CHECKW;
+        DrawCheck(dis->hDC, &c, fg);
+    }
+
+    /* Track which popup window is being painted, for every item and not just
+       the ones with submenus: a saver list has no popups at all, and it still
+       needs its border repainted. */
+    {
+        HWND mw = WindowFromDC(dis->hDC);
+        if (!mw) mw = FindWindowA("#32768", NULL);   /* menu window class */
+        if (mw != g_menuWnd) { g_menuWnd = mw; g_nArrows = 0; }
+    }
+
+    /* Do not draw the arrow here - Windows would stamp its own black one on
+       top.  Record it instead and redraw after the whole pass; see WM_FIXMENU. */
+    if (it->isPopup && g_nArrows < MAX_ARROWS) {
+        g_arrows[g_nArrows].r  = r;
+        g_arrows[g_nArrows].bg = (dis->itemState & ODS_SELECTED)
+                                 ? DARK_BGSEL : DARK_BG;
+        g_nArrows++;
+    }
+
+    if (!g_fixPending) {
+        g_fixPending = TRUE;
+        PostMessageA(g_hWnd, WM_FIXMENU, 0, 0);
+    }
+
+    old = SelectObject(dis->hDC, MenuFont());
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, fg);
+    tr = r;
+    tr.left  += ITEM_CHECKW;
+    tr.right -= ITEM_ARROWW;
+
+    /* Match the system: from Windows 2000 on, the "&" underlines stay hidden
+       until the menu is reached by keyboard.  SPI_GETKEYBOARDCUES does not
+       exist on 9x, where underlines are always shown - which is also what
+       happens here, since the call fails and cues stays TRUE. */
+    {
+        BOOL cues = TRUE;
+        UINT fmt  = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_EXPANDTABS;
+        SystemParametersInfoA(SPI_GETKEYBOARDCUES, 0, &cues, 0);
+        if (!cues) fmt |= DT_HIDEPREFIX;
+        DrawTextA(dis->hDC, it->text, -1, &tr, fmt);
+    }
+    SelectObject(dis->hDC, old);
+}
+
+/* Windows keeps its own preference as a DWORD, so this needs its own read. */
+static BOOL SystemPrefersDark(void)
+{
+    HKEY  hk;
+    DWORD type = 0, val = 1, cb = sizeof(val);
+    BOOL  dark = FALSE;
+
+    if (RegOpenKeyExA(HKEY_CURRENT_USER,
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            0, KEY_QUERY_VALUE, &hk) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExA(hk, "AppsUseLightTheme", 0, &type,
+                         (LPBYTE)&val, &cb) == ERROR_SUCCESS &&
+        type == REG_DWORD)
+        dark = (val == 0);
+    RegCloseKey(hk);
+    return dark;
+}
+
+static void LoadDarkMode(void)
+{
+    char v[16];
+    if (RegReadStr(HKEY_CURRENT_USER, REG_SETTINGS, "DarkMode", v, sizeof(v))
+        && v[0]) {
+        g_bDark = (v[0] == '1');
+        return;
+    }
+    g_bDark = SystemPrefersDark();    /* follow Windows until told otherwise */
+}
+
+static void SetDarkMode(BOOL dark)
+{
+    g_bDark = dark;
+    RegWriteStr(HKEY_CURRENT_USER, REG_SETTINGS, "DarkMode", dark ? "1" : "0");
+}
+
+/* ======================================================================= */
 /*  context menu                                                           */
 /* ======================================================================= */
 
@@ -644,11 +1193,25 @@ static void ShowContextMenu(void)
                   MF_BYCOMMAND | MF_CHECKED);
     if (AutostartEnabled())
         CheckMenuItem(hPop, IDM_AUTOSTART, MF_BYCOMMAND | MF_CHECKED);
+    if (g_bDark)
+        CheckMenuItem(hPop, IDM_DARKMODE, MF_BYCOMMAND | MF_CHECKED);
+
+    /* Last of all: every check and grey state must already be set, because
+       this reads them back off each item as it converts it. */
+    if (g_bDark) {
+        g_nMItems = 0;
+        MenuDarkBackground(hPop);
+        MenuGoDark(hPop);
+    }
 
     GetCursorPos(&pt);
     /* The classic dance that lets the menu close when focus is lost. */
     SetForegroundWindow(g_hWnd);
-    TrackPopupMenu(hPop, TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+    /* Dark mode repaints the popup's chrome after Windows has drawn it, so the
+       fade-in must not composite over that work.  TPM_NOANIMATION is a no-op
+       on anything that does not animate menus anyway. */
+    TrackPopupMenu(hPop, TPM_LEFTALIGN | TPM_RIGHTBUTTON |
+                         (g_bDark ? TPM_NOANIMATION : 0),
                    pt.x, pt.y, 0, g_hWnd, NULL);
     PostMessageA(g_hWnd, WM_NULL, 0, 0);
 
@@ -685,21 +1248,86 @@ static void OpenDisplayProperties(void)
 /*  about box                                                              */
 /* ======================================================================= */
 
+/* The OK button is owner-drawn only in dark mode: a themed button ignores
+   WM_CTLCOLORBTN for its face, so it would stay light against a dark dialog. */
+static void DrawDarkButton(DRAWITEMSTRUCT *dis)
+{
+    HBRUSH  br;
+    HGDIOBJ old;
+    RECT    r = dis->rcItem;
+    char    txt[64];
+
+    br = CreateSolidBrush((dis->itemState & ODS_SELECTED)
+                          ? RGB(80, 80, 80) : RGB(58, 58, 58));
+    if (br) { FillRect(dis->hDC, &r, br); DeleteObject(br); }
+
+    br = CreateSolidBrush((dis->itemState & (ODS_FOCUS | ODS_DEFAULT))
+                          ? RGB(140, 140, 140) : RGB(95, 95, 95));
+    if (br) { FrameRect(dis->hDC, &r, br); DeleteObject(br); }
+
+    txt[0] = 0;
+    GetWindowTextA(dis->hwndItem, txt, sizeof(txt));
+    old = SelectObject(dis->hDC, MenuFont());
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, DARK_TEXT);
+    DrawTextA(dis->hDC, txt, -1, &r, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(dis->hDC, old);
+}
+
 static INT_PTR CALLBACK AboutProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
 {
+    static HBRUSH hbrBg;
+
     switch (msg) {
     case WM_INITDIALOG:
         SendMessageA(hDlg, WM_SETICON, ICON_BIG,
                      (LPARAM)LoadIconA(g_hInst, MAKEINTRESOURCEA(IDI_ENABLED)));
+        hbrBg = NULL;
+        if (g_bDark) {
+            HWND ok = GetDlgItem(hDlg, IDOK);
+            hbrBg = CreateSolidBrush(DARK_DLGBG);
+            if (ok)
+                SetWindowLongA(ok, GWL_STYLE,
+                               GetWindowLongA(ok, GWL_STYLE) | BS_OWNERDRAW);
+            DarkenCaption(hDlg, TRUE);
+        }
         SetForegroundWindow(hDlg);
         return TRUE;
 
+    case WM_DRAWITEM:
+        if (g_bDark && wp == IDOK) {
+            DrawDarkButton((DRAWITEMSTRUCT *)lp);
+            return TRUE;
+        }
+        return FALSE;
+
+    case WM_CTLCOLORDLG:
+        if (g_bDark && hbrBg) return (INT_PTR)hbrBg;
+        return FALSE;
+
+    case WM_CTLCOLORBTN:
+        if (g_bDark && hbrBg) {
+            SetBkColor((HDC)wp, DARK_DLGBG);
+            return (INT_PTR)hbrBg;
+        }
+        return FALSE;
+
     case WM_CTLCOLORSTATIC:
         if ((HWND)lp == GetDlgItem(hDlg, IDC_ABOUT_LINK)) {
-            SetTextColor((HDC)wp, RGB(0, 0, 224));
+            SetTextColor((HDC)wp, g_bDark ? DARK_LINK : RGB(0, 0, 224));
             SetBkMode((HDC)wp, TRANSPARENT);
-            return (INT_PTR)GetSysColorBrush(COLOR_3DFACE);
+            return (INT_PTR)(g_bDark && hbrBg ? hbrBg
+                                              : GetSysColorBrush(COLOR_3DFACE));
         }
+        if (g_bDark && hbrBg) {
+            SetTextColor((HDC)wp, DARK_TEXT);
+            SetBkMode((HDC)wp, TRANSPARENT);
+            return (INT_PTR)hbrBg;
+        }
+        return FALSE;
+
+    case WM_DESTROY:
+        if (hbrBg) { DeleteObject(hbrBg); hbrBg = NULL; }
         return FALSE;
 
     case WM_COMMAND:
@@ -762,6 +1390,7 @@ static void OnCommand(UINT id)
     case IDM_DISPLAY:       OpenDisplayProperties();        break;
     case IDM_AUTOSTART:     AutostartSet(!AutostartEnabled()); break;
     case IDM_ABOUT:         ShowAbout();                    break;
+    case IDM_DARKMODE:      SetDarkMode(!g_bDark);          break;
     case IDM_LANG_DE:       SetLanguage(FALSE);             break;
     case IDM_LANG_EN:       SetLanguage(TRUE);              break;
     case IDM_EXIT:          DestroyWindow(g_hWnd);          break;
@@ -803,6 +1432,19 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
                  lp == WM_CONTEXTMENU)   ShowContextMenu();
         return 0;
 
+    case WM_FIXMENU:
+        g_fixPending = FALSE;
+        if (g_bDark) FixMenuChrome(g_menuWnd);
+        return 0;
+
+    case WM_MEASUREITEM:
+        OnMeasureItem((MEASUREITEMSTRUCT *)lp);
+        return TRUE;
+
+    case WM_DRAWITEM:
+        OnDrawItem((DRAWITEMSTRUCT *)lp);
+        return TRUE;
+
     case WM_COMMAND:
         OnCommand(LOWORD(wp));
         return 0;
@@ -840,6 +1482,7 @@ void __cdecl WinMainCRTStartup(void)
     }
 
     LoadLanguage();
+    LoadDarkMode();
     g_uTaskbarCreated = RegisterWindowMessageA("TaskbarCreated");
 
     Zero(&wc, sizeof(wc));

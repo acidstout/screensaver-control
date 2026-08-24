@@ -4,7 +4,7 @@ A native Win32 tray applet that shows and controls the state of the default
 Windows screen saver. 32-bit, no C runtime, no external dependencies —
 runs on every 32-bit Windows from **Windows 95** through **Windows 11**.
 
-`build\scrctl.exe` — **77,824 bytes**, of which ~62 KB is the two icons;
+`build\scrctl.exe` — **86,016 bytes**, of which ~62 KB is the two icons;
 code + data is about 13 KB.
 
 ## Features
@@ -20,14 +20,140 @@ code + data is about 13 KB.
 | **Ein-/Ausschalten** | `SPI_SETSCREENSAVEACTIVE` + `ScreenSaveActive`. The switch that would be a no-op is greyed out. |
 | **Anzeigeeigenschaften** | `rundll32 shell32.dll,Control_RunDLL desk.cpl,,1` (the Screen Saver page on every version), with a `ShellExecute desk.cpl` fallback. |
 | **Sprache / Language** | Switches German ⇄ English live — menu, About box and tooltip — and remembers the choice. |
+| **Dunkles Design / Dark mode** | Dark context menu and About box; checkmarked while on. Defaults to the Windows setting, then remembers your choice. |
 | **Mit Windows starten / Start with Windows** | Toggles a per-user `HKCU\…\CurrentVersion\Run` entry holding this exe's quoted full path; checkmarked while enabled. |
 | **Über… / About…** | The dialog from `About.rc`, in the selected language. |
 
-Screen savers are discovered by scanning `%WINDIR%\System32` (`\System` on 9x),
-`%WINDIR%`, and the directory of the currently configured saver. The display
-name is the `.scr`'s own **FileDescription**, falling back to the file name;
-names longer than 52 characters are clamped so the menu stays narrow, and lists
-longer than 28 entries wrap into a second column.
+## Finding the screen savers
+
+Scanned, in this order:
+
+1. `%WINDIR%\Sysnative` — recorded as `%WINDIR%\System32` (see below)
+2. `GetSystemDirectory()` — `\System` on 9x, `\System32` natively, `\SysWOW64` under WOW64
+3. `%WINDIR%`
+4. the directory of the currently configured saver, if it is somewhere else
+
+De-duplicated by file name, so the first scan wins — which is why the native
+directory is scanned first.
+
+**The WOW64 trap.** On 64-bit Windows a 32-bit process is file-redirected:
+everything it asks for in `...\System32\` is actually served out of
+`SysWOW64`. So `GetSystemDirectory()` hands us the 32-bit savers and the
+*native* `System32` — where Bubbles, Mystify, Ribbons and 3D Text live — stays
+completely invisible. The `Sysnative` alias is the way out; it exists only for
+32-bit processes under WOW64, so on 32-bit Windows and on 9x the directory
+simply isn't there and that scan finds nothing. No version check needed.
+
+`Sysnative` is meaningless to the 64-bit shell, so those entries are *recorded*
+under their real `System32` name — that is what has to end up in
+`SCRNSAVE.EXE` — and mapped back to `Sysnative` only when we open or launch
+them (`FixupLaunchPath`). Without that mapping, a saver present only in the
+native `System32` would be listed but refuse to start.
+
+## Screen saver names
+
+In the order Windows itself picks them:
+
+1. **String resource 1** of the `.scr`. This is the `scrnsave.lib`
+   `IDS_DESCRIPTION` convention, and the Display control panel has read it
+   since Windows 95. It is the *right* answer and it is why the menu now says
+   `Seifenblasen`, `Schleifen`, `Fotos`, `3D-Text`, `Leer`, `Field Lines`,
+   `Solar Winds`.
+2. **`FileDescription`** from the version info — only a fallback. For the
+   built-in savers it is a sentence (`Bildschirmschoner "Seifenblasen"`) where
+   string 1 is the actual name (`Seifenblasen`).
+3. **File name** without its extension, when neither resource is present, or
+   when the name found is longer than 52 characters — a file name beats an
+   ellipsised paragraph. (`Blaze.scr` has no string 1 and a 68-character
+   `FileDescription`, so it shows as `Blaze`.)
+
+Resources are read with `LoadLibraryEx(..., LOAD_LIBRARY_AS_DATAFILE)`, which
+maps the file without running a line of its code and reads resources out of a
+**64-bit** `.scr` from this 32-bit process without complaint.
+
+The whole list is rebuilt on every right-click, so newly installed savers show
+up immediately and names are never stale. Measured cost of a full rebuild of 27
+savers: ~15 ms. Lists longer than 28 entries wrap into a second column.
+
+## Dark mode
+
+Windows only grew a way to darken menus in Windows 10 1809, and even there it
+is undocumented `uxtheme` ordinals — useless for a program that has to look
+right back to Windows 95. Owner-drawn menu items behave identically the whole
+way back, so that is what this uses.
+
+Items are converted to `MF_OWNERDRAW` **only while dark mode is on**. In light
+mode the menu is left exactly as the system draws it, so the native look is
+never second-guessed and all the risk sits on the dark path.
+
+Two traps worth knowing, both of which produced visible bugs here:
+
+- **`GetMenuState` lies about popups.** For an item that opens a submenu it
+  returns the submenu's *item count* in the high byte and only the flags in the
+  low byte. `MF_SEPARATOR` is `0x800` — inside that high byte — so a popup with
+  8 or more entries reads back as a separator and gets drawn as a bare line.
+  Never trust high-byte flags on a popup; derive the state and rebuild the
+  flags rather than masking the raw value.
+- **`GetMenuStringA` truncates by character count, not buffer size.** Harmless
+  on a normal single-byte codepage, but on a machine with Windows 10's *"Beta:
+  Use Unicode UTF-8 for worldwide language support"* enabled `GetACP()` is
+  65001 and every non-ASCII character costs one byte off the end —
+  `Anzeigeeigenschaften öffnen` came back as `Anzeigeeigenschaften öffne`. The
+  fix is `GetMenuStringW` where it exists (every NT) with the conversion done
+  here, sized in bytes; Windows 9x has no `W` entry point but its ANSI codepage
+  can never be UTF-8, so the `A` path is exact there.
+
+### Repainting what Windows draws after us
+
+Owner-drawing the items is only half of it. Windows paints the submenu arrows
+and the popup's frame *after* `WM_DRAWITEM`, so anything drawn there for those
+two gets stamped over — an arrow drawn in the item handler ends up underneath
+the system's black one. Three pieces make it work:
+
+- **The light edge is two separate things.** A 1px window border, and 2px of
+  the menu's *own client background* that the item rects never cover — the
+  background is what actually reads as a thick light frame. `SetMenuInfo` with
+  `MIM_BACKGROUND | MIM_APPLYTOSUBMENUS` replaces it outright (Windows 2000+,
+  bound late; 9x menus have no such padding). The 1px border is then painted
+  over through a window DC.
+- **The arrows are redrawn after the fact.** `WM_DRAWITEM` records each popup
+  item's rect and posts `WM_FIXMENU` to ourselves. `TrackPopupMenu` runs a
+  modal loop that still dispatches to our window, so it is handled the moment
+  the paint finishes — no subclassing of the system menu window needed. Every
+  item updates the tracked window, not just popups: a saver list contains no
+  popups at all and still needs its border fixed.
+- **`TPM_NOANIMATION` is mandatory.** Windows 10 fades popup menus in, and the
+  fade composites over the post-paint — with the animation left on, both the
+  border and the arrow work silently did nothing.
+
+### Glyph geometry
+
+The check and the chevron are drawn by hand, so their size and placement were
+measured off a screenshot of the themed light menu and matched exactly rather
+than eyeballed:
+
+| | check | chevron |
+|---|---|---|
+| size | 10 x 7 px | 4 x 7 px |
+| stroke | 2 px | 1 px |
+| placement | 9 px in from the left | tip `ARROW_INSET` (10 px) in from the item's right edge |
+
+Verify a change here by sampling pixels, not by looking: an ink bounding box
+straight off a screen capture is the only way to tell a 1px drift from a
+correct glyph. (The light theme anti-aliases and this does not, so ink pixel
+*counts* differ slightly; the bounding boxes are identical.)
+
+GDI leaves the final point of a `LineTo` undrawn, which is why the chevron's
+last segment deliberately overshoots by one step.
+
+The About box is done the ordinary way — `WM_CTLCOLORDLG` / `WM_CTLCOLORSTATIC`
+for the background and text, plus `DWMWA_USE_IMMERSIVE_DARK_MODE` (bound late,
+absent and harmless before Windows 10 2004) for the title bar. The OK button
+has to be `BS_OWNERDRAW`, because a themed button ignores `WM_CTLCOLORBTN` for
+its face and would stay light against a dark dialog.
+
+Stored in `HKCU\Software\Rekow IT\ScreensaverControl\DarkMode` (`1`/`0`).
+With nothing stored it follows Windows' own `AppsUseLightTheme`.
 
 ## Language handling
 
@@ -77,6 +203,24 @@ resolves each to its DLL via the toolchain's own 64-bit import libraries, and
 emits `lib32\*.def` + `lib32\lib*.a` through `dlltool -m i386 -k`. Only needed
 when the set of Win32 APIs used by `scrctl.c` changes.
 
+## Tray icon robustness
+
+Getting an icon into the notification area is not a one-shot operation, and
+two separate mistakes here made the program run invisibly:
+
+1. **Never call `Shell_NotifyIcon` from `WM_CREATE`.** The window is not fully
+   created yet, and the shell may accept the icon and then quietly drop it.
+   The icon is added once `CreateWindowEx` has returned.
+2. **`NIM_ADD` returning TRUE is not proof the icon exists**, and a lost icon
+   used to be permanent — the only retry path ran when the screen saver's
+   on/off state changed, which might be never.
+
+So `TrayEnsure()` runs on every 2 s timer tick and: re-adds the icon whenever
+`g_bIconOk` is clear; otherwise probes with `NIM_MODIFY` on *every* tick until
+one probe succeeds, and only then settles down to one check every 30 s. A
+failed probe means the icon is gone, so it is added again. `TaskbarCreated`
+still handles the ordinary Explorer-restart case immediately.
+
 ## Files
 
 ```
@@ -106,6 +250,21 @@ Breaking any of these silently drops Win9x support:
   `DIALOGEX` templates and `Segoe UI` are not safe on 95.
 - `version.dll` is bound with `LoadLibrary`, so its absence degrades to file
   names instead of failing.
+- `LOAD_LIBRARY_AS_DATAFILE` (used to read screen saver names) dates back to
+  Win95; the newer `LOAD_LIBRARY_AS_IMAGE_RESOURCE` must not be used.
+- Dark mode is owner-drawn rather than themed, so it works on every version;
+  see **Dark mode**. `SPI_GETKEYBOARDCUES` and `DT_HIDEPREFIX` are quietly
+  ignored on 9x, which leaves the mnemonic underlines always visible — which
+  is exactly 9x behaviour anyway.
+- **The `.ico` files must contain classic BMP/DIB images only.** Icon editors
+  routinely store images inside an `.ico` as PNG streams; Windows only learned
+  to decode those in Vista, so on 95/98/ME/2000/XP such an entry is not an
+  icon at all. After re-exporting an icon, always run:
+  `python tools/depng_ico.py icons/*.ico` — it decodes any PNG entry and
+  re-encodes it as a 32-bpp DIB with an alpha-derived AND mask, leaving the
+  artwork unchanged. It is a no-op on files that are already clean.
+- The tray icon is added **after** `CreateWindowEx` returns, never from
+  `WM_CREATE`, and a timer re-adds it if it is ever missing. See below.
 - Linked `--subsystem windows:4.0` with OS version 4.0 so the 95/NT4 PE loader
   accepts the image; section alignment stays 4096 (9x will not map 512).
 - Built `-nostdlib`: no CRT, so no msvcrt/UCRT dependency to worry about.
@@ -119,3 +278,8 @@ Breaking any of these silently drops Win9x support:
   reliably on modern versions of Windows. Stardust Software is defunct and their
   site is gone. None of the original code was used — this binary is ~66 KB and
   shares nothing with it but the idea. Intended for release as open source.
+- Shrinking the exe further is almost entirely a matter of the icons — they
+  are ~62 KB of the 78 KB. Dropping unused sizes or colour depths from the two
+  `.ico` files is where any remaining savings are. Note that DIB entries are
+  bigger than the PNG ones an icon editor produces; that trade is mandatory,
+  see below.

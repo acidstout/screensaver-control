@@ -28,6 +28,7 @@ LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
         MENUITEM "An&zeigeeigenschaften \xF6ffnen",  IDM_DISPLAY
         MENUITEM SEPARATOR
         MENUITEM "&Mit Windows starten",  IDM_AUTOSTART
+        MENUITEM "Dunkles &Design",  IDM_DARKMODE
         POPUP "S&prache"
         {
             MENUITEM "&Deutsch",  IDM_LANG_DE
@@ -66,6 +67,7 @@ LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
         MENUITEM "Open displa&y properties",  IDM_DISPLAY
         MENUITEM SEPARATOR
         MENUITEM "Start &with Windows",  IDM_AUTOSTART
+        MENUITEM "Dar&k mode",  IDM_DARKMODE
         POPUP "&Language"
         {
             MENUITEM "&Deutsch",  IDM_LANG_DE
