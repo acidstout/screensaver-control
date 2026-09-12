@@ -3,10 +3,12 @@ EXPORTS
 CloseHandle@4
 CreateProcessA@40
 ExitProcess@4
+ExpandEnvironmentStringsA@12
 FindClose@4
 FindFirstFileA@8
 FindNextFileA@8
 FreeLibrary@4
+GetCurrentProcessId@0
 GetFileAttributesA@4
 GetModuleFileNameA@12
 GetModuleHandleA@4

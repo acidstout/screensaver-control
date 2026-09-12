@@ -19,25 +19,25 @@ FILESUBTYPE    0x0L
         {
             VALUE "CompanyName",      "Rekow IT"
             VALUE "FileDescription",  "Bildschirmschoner-Steuerung"
-            VALUE "FileVersion",      "1, 1, 0, 0"
+            VALUE "FileVersion",      VER_STR_C
             VALUE "InternalName",     "scrctl"
             VALUE "LegalCopyright",   "Copyright \xA9 2026 Rekow IT. Alle Rechte vorbehalten."
             VALUE "LegalTrademarks",  ""
             VALUE "OriginalFilename", "scrctl.exe"
             VALUE "ProductName",      "Bildschirmschoner-Steuerung"
-            VALUE "ProductVersion",   "1, 1, 0, 0"
+            VALUE "ProductVersion",   VER_STR_C
         }
         BLOCK "040904B0"
         {
             VALUE "CompanyName",      "Rekow IT"
             VALUE "FileDescription",  "Screensaver Control"
-            VALUE "FileVersion",      "1, 1, 0, 0"
+            VALUE "FileVersion",      VER_STR_C
             VALUE "InternalName",     "scrctl"
             VALUE "LegalCopyright",   "Copyright \xA9 2026 Rekow IT. All rights reserved."
             VALUE "LegalTrademarks",  ""
             VALUE "OriginalFilename", "scrctl.exe"
             VALUE "ProductName",      "Screensaver Control"
-            VALUE "ProductVersion",   "1, 1, 0, 0"
+            VALUE "ProductVersion",   VER_STR_C
         }
     }
     BLOCK "VarFileInfo"

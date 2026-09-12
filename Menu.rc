@@ -29,6 +29,8 @@ LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
         MENUITEM SEPARATOR
         MENUITEM "&Mit Windows starten",  IDM_AUTOSTART
         MENUITEM "Dunkles &Design",  IDM_DARKMODE
+        MENUITEM "&W\xE4chter: Zustand wiederherstellen",  IDM_GUARD
+        MENUITEM "(none)",  IDM_CULPRIT,  GRAYED
         POPUP "S&prache"
         {
             MENUITEM "&Deutsch",  IDM_LANG_DE
@@ -68,6 +70,8 @@ LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
         MENUITEM SEPARATOR
         MENUITEM "Start &with Windows",  IDM_AUTOSTART
         MENUITEM "Dar&k mode",  IDM_DARKMODE
+        MENUITEM "&Guard: restore the setting",  IDM_GUARD
+        MENUITEM "(none)",  IDM_CULPRIT,  GRAYED
         POPUP "&Language"
         {
             MENUITEM "&Deutsch",  IDM_LANG_DE

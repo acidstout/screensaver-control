@@ -3,11 +3,25 @@
 #define RESOURCE_H
 
 /* ---- version ---------------------------------------------------------- */
+#include "buildno.h"        /* VER_BUILD - bumped by build.bat / build.sh */
+
 #define VER_MAJOR   1
 #define VER_MINOR   1
 #define VER_REV     0
-#define VER_BUILD   0
-#define VER_STR     "1.1.0.0"
+
+/* Built from the numbers above so the version can never disagree with itself:
+   two binaries sharing a version string is exactly how a stale deployed copy
+   goes unnoticed.  windres runs the C preprocessor, so stringification works
+   in the .rc files too. */
+#define VER_STRINGIFY_(x) #x
+#define VER_S(x)          VER_STRINGIFY_(x)
+
+/* "1.1.0.42" */
+#define VER_STR    VER_S(VER_MAJOR) "." VER_S(VER_MINOR) "." \
+                   VER_S(VER_REV)   "." VER_S(VER_BUILD)
+/* "1, 1, 0, 42" - the spelling VERSIONINFO's string block uses */
+#define VER_STR_C  VER_S(VER_MAJOR) ", " VER_S(VER_MINOR) ", " \
+                   VER_S(VER_REV)   ", " VER_S(VER_BUILD)
 
 /* Homepage opened by the link in the About box. Change to taste. */
 #define APP_URL     "https://www.rekow.ch"
@@ -49,6 +63,8 @@
 #define IDM_LANG_DE       32790
 #define IDM_LANG_EN       32791
 #define IDM_DARKMODE      32792
+#define IDM_GUARD         32793
+#define IDM_CULPRIT       32794   /* informational, always greyed */
 
 /* ---- dynamic command ranges ------------------------------------------- */
 #define IDR_RUN_BASE      40000
@@ -66,5 +82,7 @@
 #define IDS_NODEFAULT     3
 #define IDS_APPTITLE      4
 #define IDS_STARTFAIL     5
+#define IDS_DISABLEDBY    6
+#define IDS_NOCULPRIT     7
 
 #endif /* RESOURCE_H */

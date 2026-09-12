@@ -20,6 +20,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include "resource.h"
 
 #define CLASSNAME     "ScreensaverControlWndClass"
@@ -173,8 +174,18 @@ static void SaverSetActive(BOOL on)
 /* Full path of the configured default saver; FALSE when none is set. */
 static BOOL GetDefaultSaver(char *out, DWORD cb)
 {
-    return RegReadStr(HKEY_CURRENT_USER, REG_DESKTOP, "SCRNSAVE.EXE", out, cb)
-           && out[0];
+    char raw[MAX_PATH];
+
+    if (!RegReadStr(HKEY_CURRENT_USER, REG_DESKTOP, "SCRNSAVE.EXE",
+                    raw, sizeof(raw)) || !raw[0])
+        return FALSE;
+
+    /* Usually a plain path, but the value is allowed to be REG_EXPAND_SZ with
+       %SystemRoot% in it and nothing downstream would expand that for us. */
+    out[0] = 0;
+    if (!ExpandEnvironmentStringsA(raw, out, cb) || !out[0])
+        lstrcpynA(out, raw, cb);
+    return out[0] != 0;
 }
 
 static void SetDefaultSaver(const char *path)
@@ -455,6 +466,55 @@ static void SortSavers(void)
     }
 }
 
+/* The native System32, despite WOW64 file redirection.
+
+   This used to go through the "Sysnative" alias alone, which turned out to be
+   the wrong tool: Sysnative is reliable for *opening* a file (which is why
+   launching a System32-only saver worked even when the menu could not find
+   one) but enumerating a directory through it is not dependable - on some
+   Windows versions FindFirstFile comes back empty and every saver that lives
+   only in the native System32 silently vanishes from the list.
+
+   Wow64DisableWow64FsRedirection is the documented mechanism and it covers
+   enumeration too.  It is per-thread, and this program is single threaded.
+   The alias is kept purely as a fallback. */
+static void ScanNativeSystem32(const char *win)
+{
+    typedef BOOL (WINAPI *PFNDISABLE)(PVOID *);
+    typedef BOOL (WINAPI *PFNREVERT)(PVOID);
+    static PFNDISABLE disable = NULL;
+    static PFNREVERT  revert  = NULL;
+    static BOOL       ready   = FALSE;
+    char  sys32[MAX_PATH], nat[MAX_PATH];
+    PVOID state = NULL;
+
+    if (!win || !win[0]) return;
+
+    lstrcpynA(sys32, win, MAX_PATH);
+    lstrcatA(sys32, "\\System32");
+
+    if (!ready) {
+        HMODULE k = GetModuleHandleA("kernel32.dll");
+        ready = TRUE;
+        disable = (PFNDISABLE)(void *)GetProcAddress(
+                      k, "Wow64DisableWow64FsRedirection");
+        revert  = (PFNREVERT)(void *)GetProcAddress(
+                      k, "Wow64RevertWow64FsRedirection");
+    }
+
+    /* Absent on 32-bit Windows and on 9x, where there is nothing to redirect
+       and the ordinary GetSystemDirectory scan already covers System32. */
+    if (disable && revert && disable(&state)) {
+        ScanDir(sys32, sys32, TRUE);
+        revert(state);
+        return;
+    }
+
+    lstrcpynA(nat, win, MAX_PATH);
+    lstrcatA(nat, "\\Sysnative");
+    ScanDir(nat, sys32, TRUE);
+}
+
 static void EnumSavers(void)
 {
     char dir[MAX_PATH];
@@ -487,33 +547,62 @@ static void EnumSavers(void)
        SysWOW64 copy of the same saver, exactly as the Control Panel does. */
     win[0] = 0;
     GetWindowsDirectoryA(win, sizeof(win));
-    if (win[0]) {
-        char nat[MAX_PATH], rec[MAX_PATH];
-        lstrcpynA(nat, win, MAX_PATH); lstrcatA(nat, "\\Sysnative");
-        lstrcpynA(rec, win, MAX_PATH); lstrcatA(rec, "\\System32");
-        ScanDir(nat, rec, TRUE);
-    }
+    ScanNativeSystem32(win);
 
     dir[0] = 0; GetSystemDirectoryA(dir, sizeof(dir));  ScanDir(dir, dir, FALSE);
     if (win[0]) ScanDir(win, win, FALSE);
 
-    /* A saver configured from somewhere else must still show up. */
+    /* A saver configured from somewhere else must still show up.  Search the
+       directory in the form this process can actually reach, but record the
+       entries under the name the registry uses - those two differ under
+       WOW64. */
     if (GetDefaultSaver(cur, sizeof(cur)) && !AlreadyHave(BaseName(cur))) {
-        const char *b = BaseName(cur);
-        if (b > cur) {
-            lstrcpynA(dir, cur, (int)(b - cur));   /* strips the backslash */
-            ScanDir(dir, dir, FALSE);
+        char        probe[MAX_PATH];
+        const char *bp, *bc;
+
+        lstrcpynA(probe, cur, MAX_PATH);
+        FixupLaunchPath(probe, MAX_PATH);
+        bp = BaseName(probe);
+        bc = BaseName(cur);
+        if (bp > probe && bc > cur) {
+            char rec[MAX_PATH];
+            lstrcpynA(dir, probe, (int)(bp - probe));  /* strips the backslash */
+            lstrcpynA(rec, cur,   (int)(bc - cur));
+            ScanDir(dir, rec, FALSE);
+        }
+    }
+
+    /* Whatever the scans did or did not turn up, the configured saver has to
+       appear - showing which one is current is the whole point of the list.
+       Add it by hand rather than trusting any directory walk. */
+    if (GetDefaultSaver(cur, sizeof(cur)) && !AlreadyHave(BaseName(cur)) &&
+        g_nSavers < MAX_SAVERS) {
+        char probe[MAX_PATH];
+
+        lstrcpynA(probe, cur, MAX_PATH);
+        FixupLaunchPath(probe, MAX_PATH);
+        if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
+            SAVER *s = &g_savers[g_nSavers];
+            lstrcpynA(s->file, cur, MAX_PATH);
+            s->native = 0;
+            ResolveName(probe, BaseName(cur), s->name, sizeof(s->name));
+            if (s->name[0]) g_nSavers++;
         }
     }
 
     SortSavers();
 
+    /* Exact path first; fall back to the file name, since the registry and our
+       own spelling of the same file need not match character for character. */
     if (GetDefaultSaver(cur, sizeof(cur))) {
         for (i = 0; i < g_nSavers; i++)
-            if (lstrcmpiA(BaseName(g_savers[i].file), BaseName(cur)) == 0) {
-                g_iDefault = i;
-                break;
-            }
+            if (lstrcmpiA(g_savers[i].file, cur) == 0) { g_iDefault = i; break; }
+        if (g_iDefault < 0)
+            for (i = 0; i < g_nSavers; i++)
+                if (lstrcmpiA(BaseName(g_savers[i].file), BaseName(cur)) == 0) {
+                    g_iDefault = i;
+                    break;
+                }
     }
 }
 
@@ -613,13 +702,293 @@ static void TrayEnsure(void)
     }
 }
 
+/* ======================================================================= */
+/*  guard: who turned the screen saver off, and putting it back            */
+/* ======================================================================= */
+
+/* Games routinely switch the screen saver off so a cut scene is not
+   interrupted, and some of them never switch it back - GTA V is the reason
+   this exists.  Note that a game holding SetThreadExecutionState cannot cause
+   that: the request dies with the process.  Only the persistent route,
+   SystemParametersInfo(SPI_SETSCREENSAVEACTIVE, FALSE), leaves the setting off
+   afterwards, and that is exactly the case this can repair.
+
+   The rule: remember what the *user* wants.  If the setting goes off while
+   some other program owns the foreground, that program is a suspect; it is
+   only treated as one once it is seen running full screen, which is what
+   separates a game from somebody unticking the box in the control panel.  The
+   setting is left alone for as long as the suspect runs - the whole point is
+   not to interrupt the game - and restored once its process is gone. */
+
+#define SUSPECT_GRACE  15           /* ticks (~30 s) to show itself full screen */
+#define ZOMBIE_TICKS    5           /* ticks (~10 s) with no window of its own  */
+
+static BOOL  g_bGuard;              /* feature enabled, persisted            */
+static BOOL  g_bIntended;           /* the state the user actually wants     */
+static DWORD g_suspectPid;          /* turned it off; 0 = nobody             */
+static char  g_suspectName[64];
+static BOOL  g_suspectFull;         /* has been seen running full screen     */
+static UINT  g_suspectAge;          /* ticks since it was noticed            */
+static UINT  g_suspectGone;         /* consecutive ticks showing nothing     */
+static char  g_culprit[64];         /* last confirmed one, for the menu      */
+
+/* ToolHelp32 is on Windows 95 and on Windows 2000 and later, but not NT4, so
+   it is bound late and everything here degrades to "unknown" without it. */
+typedef HANDLE (WINAPI *PFNSNAP)(DWORD, DWORD);
+typedef BOOL   (WINAPI *PFNPROC32)(HANDLE, LPPROCESSENTRY32);
+
+static PFNSNAP   g_pSnap;
+static PFNPROC32 g_pFirst, g_pNext;
+
+static void LoadToolHelp(void)
+{
+    static BOOL ready = FALSE;
+    HMODULE k;
+
+    if (ready) return;
+    ready = TRUE;
+    k = GetModuleHandleA("kernel32.dll");
+    g_pSnap  = (PFNSNAP)  (void *)GetProcAddress(k, "CreateToolhelp32Snapshot");
+    g_pFirst = (PFNPROC32)(void *)GetProcAddress(k, "Process32First");
+    g_pNext  = (PFNPROC32)(void *)GetProcAddress(k, "Process32Next");
+}
+
+/* Exe name for a pid.  Empty when it cannot be determined or has exited. */
+static void ProcessName(DWORD pid, char *out, int cb)
+{
+    HANDLE         snap;
+    PROCESSENTRY32 pe;
+
+    out[0] = 0;
+    LoadToolHelp();
+    if (!g_pSnap || !g_pFirst || !g_pNext || !pid) return;
+
+    snap = g_pSnap(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+
+    Zero(&pe, sizeof(pe));
+    pe.dwSize = sizeof(pe);
+    if (g_pFirst(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID == pid) {
+                lstrcpynA(out, BaseName(pe.szExeFile), cb);
+                break;
+            }
+        } while (g_pNext(snap, &pe));
+    }
+    CloseHandle(snap);
+}
+
+/* TRUE while a process with this pid *and* this exe name still exists - the
+   name guards against the pid being handed to something else meanwhile. */
+static BOOL ProcessAlive(DWORD pid, const char *name)
+{
+    char now[64];
+
+    if (!pid) return FALSE;
+    ProcessName(pid, now, sizeof(now));
+    if (!now[0]) return FALSE;
+    return name[0] ? (lstrcmpiA(now, name) == 0) : TRUE;
+}
+
+/* Does this process still put anything on the screen?
+
+   Waiting for the process to exit is not enough on its own: GTA V regularly
+   fails to shut down and sits in the task list until it is killed by hand, and
+   the screen saver would stay off all that time.  A process whose windows are
+   all gone is finished as far as the user is concerned, whatever the task list
+   says.  A minimised window still counts as visible, so this does not fire
+   just because the game was minimised. */
+typedef struct { DWORD pid; BOOL found; } VISWND;
+
+static BOOL CALLBACK VisWndProc(HWND h, LPARAM lp)
+{
+    VISWND *v = (VISWND *)lp;
+    DWORD   p = 0;
+
+    GetWindowThreadProcessId(h, &p);
+    if (p == v->pid && IsWindowVisible(h)) {
+        v->found = TRUE;
+        return FALSE;                        /* stop enumerating */
+    }
+    return TRUE;
+}
+
+static BOOL ProcessHasVisibleWindow(DWORD pid)
+{
+    VISWND v;
+
+    if (!pid) return FALSE;
+    v.pid   = pid;
+    v.found = FALSE;
+    EnumWindows(VisWndProc, (LPARAM)&v);
+    return v.found;
+}
+
+/* The foreground window's owner, and whether it covers a whole monitor. */
+static BOOL ForegroundApp(DWORD *pid, char *name, int cb, BOOL *fullscreen)
+{
+    typedef HMONITOR (WINAPI *PFNMFW)(HWND, DWORD);
+    typedef BOOL     (WINAPI *PFNGMI)(HMONITOR, LPMONITORINFO);
+    static PFNMFW monFrom = NULL;
+    static PFNGMI monInfo = NULL;
+    static BOOL   ready   = FALSE;
+
+    HWND  fg = GetForegroundWindow();
+    RECT  wr, mr;
+    DWORD p = 0;
+
+    *pid = 0; name[0] = 0; *fullscreen = FALSE;
+    if (!fg || fg == GetDesktopWindow()) return FALSE;
+
+    GetWindowThreadProcessId(fg, &p);
+    if (!p || p == GetCurrentProcessId()) return FALSE;
+    *pid = p;
+    ProcessName(p, name, cb);
+
+    if (!GetWindowRect(fg, &wr)) return TRUE;
+
+    if (!ready) {
+        HMODULE u = GetModuleHandleA("user32.dll");
+        ready = TRUE;
+        monFrom = (PFNMFW)(void *)GetProcAddress(u, "MonitorFromWindow");
+        monInfo = (PFNGMI)(void *)GetProcAddress(u, "GetMonitorInfoA");
+    }
+
+    mr.left = mr.top = 0;
+    mr.right  = GetSystemMetrics(SM_CXSCREEN);
+    mr.bottom = GetSystemMetrics(SM_CYSCREEN);
+    if (monFrom && monInfo) {                 /* multi-monitor: Windows 98+ */
+        MONITORINFO mi;
+        HMONITOR    hm = monFrom(fg, MONITOR_DEFAULTTONEAREST);
+        Zero(&mi, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        if (hm && monInfo(hm, &mi)) mr = mi.rcMonitor;
+    }
+
+    /* Exclusive full screen and borderless both look like this. */
+    *fullscreen = (wr.left  <= mr.left  && wr.top    <= mr.top &&
+                   wr.right >= mr.right && wr.bottom >= mr.bottom);
+    return TRUE;
+}
+
+static void ForgetSuspect(void)
+{
+    g_suspectPid    = 0;
+    g_suspectName[0] = 0;
+    g_suspectFull   = FALSE;
+    g_suspectAge    = 0;
+    g_suspectGone   = 0;
+}
+
+/* The user said what they want - stop second-guessing it. */
+static void SetIntended(BOOL on)
+{
+    g_bIntended = on;
+    ForgetSuspect();
+}
+
+static void LoadGuard(void)
+{
+    char v[16];
+    g_bGuard = TRUE;                 /* on unless switched off */
+    if (RegReadStr(HKEY_CURRENT_USER, REG_SETTINGS, "Guard", v, sizeof(v))
+        && v[0])
+        g_bGuard = (v[0] != '0');
+    g_culprit[0] = 0;
+    RegReadStr(HKEY_CURRENT_USER, REG_SETTINGS, "LastDisabledBy",
+               g_culprit, sizeof(g_culprit));
+}
+
+static void SetGuard(BOOL on)
+{
+    g_bGuard = on;
+    RegWriteStr(HKEY_CURRENT_USER, REG_SETTINGS, "Guard", on ? "1" : "0");
+    if (!on) ForgetSuspect();
+}
+
+/* Called once per timer tick, after the on/off state has been read. */
+static void GuardTick(BOOL now, BOOL changed)
+{
+    DWORD pid = 0;
+    char  name[64];
+    BOOL  full = FALSE;
+
+    if (changed) {
+        if (now) {
+            /* Back on - whoever did it, that is now the wanted state. */
+            SetIntended(TRUE);
+            return;
+        }
+        /* Switched off by something that is not us. */
+        ForegroundApp(&pid, name, sizeof(name), &full);
+        if (!pid) { SetIntended(FALSE); return; }
+
+        g_suspectPid  = pid;
+        g_suspectFull = full;
+        g_suspectAge  = 0;
+        g_suspectGone = 0;
+        lstrcpynA(g_suspectName, name, sizeof(g_suspectName));
+        return;
+    }
+
+    if (!g_suspectPid) return;
+
+    /* It may not have gone full screen yet - games switch the saver off while
+       still loading in a window - so keep watching for a while. */
+    if (!g_suspectFull) {
+        DWORD fpid = 0;
+        char  fname[64];
+        BOOL  ffull = FALSE;
+        ForegroundApp(&fpid, fname, sizeof(fname), &ffull);
+        if (ffull && fpid == g_suspectPid) g_suspectFull = TRUE;
+    }
+
+    if (g_suspectFull) {
+        /* Confirmed.  Remember it, and leave the setting alone while it runs. */
+        if (lstrcmpiA(g_culprit, g_suspectName) != 0) {
+            lstrcpynA(g_culprit, g_suspectName, sizeof(g_culprit));
+            RegWriteStr(HKEY_CURRENT_USER, REG_SETTINGS, "LastDisabledBy",
+                        g_culprit);
+        }
+        /* Finished = the process is gone, or it has stopped showing anything
+           for a while (a hung game still listed in the task manager). */
+        if (!ProcessAlive(g_suspectPid, g_suspectName)) {
+            g_suspectGone = ZOMBIE_TICKS;
+        } else if (!ProcessHasVisibleWindow(g_suspectPid)) {
+            g_suspectGone++;
+        } else {
+            g_suspectGone = 0;
+        }
+
+        if (g_suspectGone >= ZOMBIE_TICKS) {
+            ForgetSuspect();
+            if (g_bGuard && g_bIntended && !SaverIsActive()) {
+                SaverSetActive(TRUE);       /* put it back */
+                g_bActive = TRUE;
+                TrayUpdate();
+            }
+        }
+        return;
+    }
+
+    /* Never went full screen, and it is gone or has had long enough: this was
+       somebody changing the setting on purpose, so adopt it. */
+    if (++g_suspectAge >= SUSPECT_GRACE ||
+        !ProcessAlive(g_suspectPid, g_suspectName))
+        SetIntended(FALSE);
+}
+
 static void RefreshState(BOOL force)
 {
-    BOOL now = SaverIsActive();
-    if (force || now != g_bActive) {
+    BOOL now     = SaverIsActive();
+    BOOL changed = (now != g_bActive);
+
+    if (force || changed) {
         g_bActive = now;
         TrayUpdate();
     }
+    GuardTick(now, changed);
 }
 
 /* ======================================================================= */
@@ -1195,6 +1564,19 @@ static void ShowContextMenu(void)
         CheckMenuItem(hPop, IDM_AUTOSTART, MF_BYCOMMAND | MF_CHECKED);
     if (g_bDark)
         CheckMenuItem(hPop, IDM_DARKMODE, MF_BYCOMMAND | MF_CHECKED);
+    if (g_bGuard)
+        CheckMenuItem(hPop, IDM_GUARD, MF_BYCOMMAND | MF_CHECKED);
+
+    /* Purely informational, and the answer to "which program was it?". */
+    {
+        char line[160];
+        if (g_culprit[0])
+            wsprintfA(line, Str(IDS_DISABLEDBY), g_culprit);
+        else
+            lstrcpynA(line, Str(IDS_NOCULPRIT), sizeof(line));
+        ModifyMenuA(hPop, IDM_CULPRIT,
+                    MF_BYCOMMAND | MF_STRING | MF_GRAYED, IDM_CULPRIT, line);
+    }
 
     /* Last of all: every check and grey state must already be set, because
        this reads them back off each item as it converts it. */
@@ -1383,14 +1765,17 @@ static void OnCommand(UINT id)
 
     switch (id) {
     case IDM_START_DEFAULT: StartDefaultSaver();            break;
-    case IDM_ENABLE:        SaverSetActive(TRUE);
+    case IDM_ENABLE:        SetIntended(TRUE);
+                            SaverSetActive(TRUE);
                             RefreshState(TRUE);             break;
-    case IDM_DISABLE:       SaverSetActive(FALSE);
+    case IDM_DISABLE:       SetIntended(FALSE);
+                            SaverSetActive(FALSE);
                             RefreshState(TRUE);             break;
     case IDM_DISPLAY:       OpenDisplayProperties();        break;
     case IDM_AUTOSTART:     AutostartSet(!AutostartEnabled()); break;
     case IDM_ABOUT:         ShowAbout();                    break;
     case IDM_DARKMODE:      SetDarkMode(!g_bDark);          break;
+    case IDM_GUARD:         SetGuard(!g_bGuard);            break;
     case IDM_LANG_DE:       SetLanguage(FALSE);             break;
     case IDM_LANG_EN:       SetLanguage(TRUE);              break;
     case IDM_EXIT:          DestroyWindow(g_hWnd);          break;
@@ -1483,6 +1868,7 @@ void __cdecl WinMainCRTStartup(void)
 
     LoadLanguage();
     LoadDarkMode();
+    LoadGuard();
     g_uTaskbarCreated = RegisterWindowMessageA("TaskbarCreated");
 
     Zero(&wc, sizeof(wc));
@@ -1498,7 +1884,8 @@ void __cdecl WinMainCRTStartup(void)
                              0, 0, 0, 0, NULL, NULL, g_hInst, NULL);
     if (!g_hWnd) ExitProcess(1);
 
-    g_bActive = SaverIsActive();
+    g_bActive   = SaverIsActive();
+    g_bIntended = g_bActive;   /* whatever it is at startup is what is wanted */
     TrayAdd();          /* if this is dropped, the timer notices and retries */
 
     while (GetMessageA(&msg, NULL, 0, 0) > 0) {

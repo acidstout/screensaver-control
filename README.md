@@ -4,7 +4,7 @@ A native Win32 tray applet that shows and controls the state of the default
 Windows screen saver. 32-bit, no C runtime, no external dependencies —
 runs on every 32-bit Windows from **Windows 95** through **Windows 11**.
 
-`build\scrctl.exe` — **86,016 bytes**, of which ~62 KB is the two icons;
+`build\scrctl.exe` — **92,160 bytes**, of which ~62 KB is the two icons;
 code + data is about 13 KB.
 
 ## Features
@@ -22,33 +22,56 @@ code + data is about 13 KB.
 | **Sprache / Language** | Switches German ⇄ English live — menu, About box and tooltip — and remembers the choice. |
 | **Dunkles Design / Dark mode** | Dark context menu and About box; checkmarked while on. Defaults to the Windows setting, then remembers your choice. |
 | **Mit Windows starten / Start with Windows** | Toggles a per-user `HKCU\…\CurrentVersion\Run` entry holding this exe's quoted full path; checkmarked while enabled. |
+| **Wächter / Guard** | Watches for another program switching the screen saver off and puts the setting back once that program is finished; checkmarked while on. The greyed line under it names the last program that did it. |
 | **Über… / About…** | The dialog from `About.rc`, in the selected language. |
 
 ## Finding the screen savers
 
 Scanned, in this order:
 
-1. `%WINDIR%\Sysnative` — recorded as `%WINDIR%\System32` (see below)
+1. the **native** `%WINDIR%\System32` (see below)
 2. `GetSystemDirectory()` — `\System` on 9x, `\System32` natively, `\SysWOW64` under WOW64
 3. `%WINDIR%`
 4. the directory of the currently configured saver, if it is somewhere else
 
 De-duplicated by file name, so the first scan wins — which is why the native
-directory is scanned first.
+directory is scanned first, exactly as the Control Panel prefers it.
 
 **The WOW64 trap.** On 64-bit Windows a 32-bit process is file-redirected:
 everything it asks for in `...\System32\` is actually served out of
-`SysWOW64`. So `GetSystemDirectory()` hands us the 32-bit savers and the
-*native* `System32` — where Bubbles, Mystify, Ribbons and 3D Text live — stays
-completely invisible. The `Sysnative` alias is the way out; it exists only for
-32-bit processes under WOW64, so on 32-bit Windows and on 9x the directory
-simply isn't there and that scan finds nothing. No version check needed.
+`SysWOW64`. So `GetSystemDirectory()` hands us the 32-bit savers, and the
+*native* `System32` — where Bubbles, Mystify, Ribbons and 3D Text live — is
+invisible.
 
-`Sysnative` is meaningless to the 64-bit shell, so those entries are *recorded*
-under their real `System32` name — that is what has to end up in
-`SCRNSAVE.EXE` — and mapped back to `Sysnative` only when we open or launch
-them (`FixupLaunchPath`). Without that mapping, a saver present only in the
-native `System32` would be listed but refuse to start.
+The way through is `Wow64DisableWow64FsRedirection` / `…Revert…`, bound late
+and absent on 32-bit Windows and 9x (where there is nothing to redirect and
+scan 2 already covers `System32`). It is per-thread, and this program is
+single threaded.
+
+> This used to go through the `Sysnative` alias instead, and that was the
+> wrong tool. Sysnative is dependable for **opening** a file but not for
+> **enumerating** a directory — on Windows 11 `FindFirstFile` through it comes
+> back empty, so every saver that lives only in the native `System32`
+> disappeared from the menu. The tell-tale was that starting the current saver
+> still worked (that path only ever *opens* the file, via `FixupLaunchPath`)
+> while the menu could not find it to put a checkmark on. Sysnative remains
+> only as a fallback, and is still what `FixupLaunchPath` uses to launch.
+
+Entries found in the native directory are *recorded* under their real
+`System32` name — that is what has to end up in `SCRNSAVE.EXE`, and neither
+`Sysnative` nor a redirection-disabled handle means anything to the 64-bit
+shell that reads it.
+
+**The configured saver is guaranteed to be listed.** After the scans, if the
+value in `SCRNSAVE.EXE` still is not among them, it is added directly and
+checkmarked. No directory walk is trusted for this: the whole point of the
+list is to show which saver is current, so that must not depend on having
+found its folder. It also covers a saver configured as something other than
+`*.scr`, which no `*.scr` walk could ever match.
+
+The registry value is run through `ExpandEnvironmentStrings` first — it is
+allowed to be `REG_EXPAND_SZ` holding `%SystemRoot%\…`, and nothing
+downstream would expand that.
 
 ## Screen saver names
 
@@ -155,6 +178,53 @@ its face and would stay light against a dark dialog.
 Stored in `HKCU\Software\Rekow IT\ScreensaverControl\DarkMode` (`1`/`0`).
 With nothing stored it follows Windows' own `AppsUseLightTheme`.
 
+## The guard
+
+Games switch the screen saver off so a cut scene is not interrupted, and some
+never switch it back — GTA V is the reason this exists.
+
+Worth knowing which mechanism can actually cause that:
+
+- **`SetThreadExecutionState`** is transient. The request dies with the
+  process, so it can *never* leave the setting off afterwards.
+- **`SystemParametersInfo(SPI_SETSCREENSAVEACTIVE, FALSE)`** is persistent, and
+  is the only thing that can. This is what the guard repairs.
+
+The rule: remember what the *user* wants. If the setting goes off while another
+process owns the foreground, that process becomes a suspect. It is only treated
+as one once it has been seen running full screen — window rect covering the
+monitor, which catches borderless and exclusive alike — and that is what
+separates a game from somebody unticking the box in the control panel. The
+setting is then left alone for as long as that program is running, because not
+interrupting the game is the whole point, and restored once it is finished.
+
+**Finished does not mean "the process exited".** GTA V regularly fails to shut
+down and sits in the task list until it is killed by hand, and the screen saver
+would stay off all that time. So a suspect counts as finished when its process
+is gone *or* when it has had no visible window for ~10 s. A minimised window
+still counts as visible, so minimising the game does not trigger it.
+
+A suspect that is never seen full screen within ~30 s is treated as a
+deliberate change and adopted as the new wanted state — that is what stops the
+guard fighting the control panel, or the program's own menu.
+
+`Guard` (on unless switched off) and `LastDisabledBy` live in the settings key.
+Process lookup uses ToolHelp32 and full-screen detection uses
+`MonitorFromWindow`/`GetMonitorInfo`, all bound late with a `SM_CXSCREEN`
+fallback, so none of it costs Windows 95 compatibility.
+
+### Two facts about the screen saver API
+
+Both cost time to discover, and neither is obvious:
+
+- **`SPI_GETSCREENSAVEACTIVE` does not follow the registry.** Writing
+  `ScreenSaveActive` directly leaves the getter reporting the old value
+  indefinitely. The live per-session value is what decides whether Windows
+  starts the saver; the registry is only read at logon. The two can disagree.
+- **`SPI_SETSCREENSAVEACTIVE` fails with 329 while a screen saver is running**,
+  and `SPIF_SENDWININICHANGE` makes it return error 1460 (`ERROR_TIMEOUT`) from
+  the broadcast even when it succeeded. Do not read failure into either.
+
 ## Language handling
 
 The two languages are **separate resource IDs**, not resource *locales*:
@@ -182,6 +252,23 @@ The menu item is only checkmarked when the stored path actually resolves to
 **this** executable, so an entry left behind by a copy that has since been
 moved or replaced reads as off; switching it on then overwrites it with the
 current path.
+
+## Version numbering
+
+`VER_MAJOR` / `VER_MINOR` / `VER_REV` live in `resource.h`; `VER_BUILD` lives
+in `buildno.h` and is **incremented by every build**, by `build.bat` and
+`build.sh` alike (no external tool — plain `set /a` and `$(( ))`). `buildno.h`
+is committed so a fresh checkout builds without running anything first.
+
+`VER_STR` (`"1.1.0.42"`) and `VER_STR_C` (`"1, 1, 0, 42"`, the spelling
+VERSIONINFO's string block uses) are assembled from those four numbers by
+stringification — windres runs the C preprocessor, so this works in the `.rc`
+files too. Nothing anywhere repeats the version by hand, so the numeric
+`FILEVERSION`, the version strings and the About box cannot drift apart.
+
+The point of bumping every build is that a deployed copy is identifiable. Two
+different binaries sharing `1.1.0.0` is exactly how a stale `scrctl.exe` sat
+in place unnoticed.
 
 ## Building
 
@@ -225,7 +312,8 @@ still handles the ordinary Explorer-restart case immediately.
 
 ```
 scrctl.c              the whole program
-resource.h            shared IDs, version number, About-box URL
+resource.h            shared IDs, version numbers, About-box URL
+buildno.h             build counter, rewritten by every build
 scrctl.rc             master resource script (the one handed to windres)
   Menu.rc             tray context menu, DE (132) + EN (133)
   About.rc            About box, DE (101) + EN (102)
@@ -281,5 +369,4 @@ Breaking any of these silently drops Win9x support:
 - Shrinking the exe further is almost entirely a matter of the icons — they
   are ~62 KB of the 78 KB. Dropping unused sizes or colour depths from the two
   `.ico` files is where any remaining savings are. Note that DIB entries are
-  bigger than the PNG ones an icon editor produces; that trade is mandatory,
-  see below.
+  bigger than the PNG ones an icon editor produces; that trade is mandatory.
