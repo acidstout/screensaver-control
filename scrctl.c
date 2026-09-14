@@ -636,7 +636,16 @@ static void TrayAdd(void)
 {
     NOTIFYICONDATAA nid;
     TrayFill(&nid, TRUE);
-    g_bIconOk = Shell_NotifyIconA(NIM_ADD, &nid);
+
+    /* NIM_ADD fails whenever the shell still holds our icon - and that is
+       precisely the state one transient NIM_MODIFY failure leaves behind
+       (Explorer slow to answer, e.g. while a game is running).  With NIM_ADD
+       alone that recovery can never succeed: g_bIconOk stayed FALSE, every
+       update became another rejected add, and the icon and tooltip froze for
+       the rest of the session.  Falling back to NIM_MODIFY adopts the icon
+       that is already there. */
+    g_bIconOk = Shell_NotifyIconA(NIM_ADD, &nid) ||
+                Shell_NotifyIconA(NIM_MODIFY, &nid);
 }
 
 static void TrayUpdate(void)
@@ -725,6 +734,7 @@ static void TrayEnsure(void)
 
 static BOOL  g_bGuard;              /* feature enabled, persisted            */
 static BOOL  g_bIntended;           /* the state the user actually wants     */
+static BOOL  g_guardLast;           /* last state the GUARD saw - see below  */
 static DWORD g_suspectPid;          /* turned it off; 0 = nobody             */
 static char  g_suspectName[64];
 static BOOL  g_suspectFull;         /* has been seen running full screen     */
@@ -841,6 +851,21 @@ static BOOL ForegroundApp(DWORD *pid, char *name, int cb, BOOL *fullscreen)
     *pid = 0; name[0] = 0; *fullscreen = FALSE;
     if (!fg || fg == GetDesktopWindow()) return FALSE;
 
+    /* The visible desktop is Progman/WorkerW, owned by Explorer and exactly
+       the size of the monitor - so without this, Explorer read as a
+       full-screen app whenever the desktop had the focus, and was tracked as
+       a suspect forever because it never exits.  The taskbar is where the
+       focus lands after using our own tray menu. */
+    {
+        char cls[32];
+        cls[0] = 0;
+        GetClassNameA(fg, cls, sizeof(cls));
+        if (!lstrcmpiA(cls, "Progman")       || !lstrcmpiA(cls, "WorkerW") ||
+            !lstrcmpiA(cls, "Shell_TrayWnd") ||
+            !lstrcmpiA(cls, "Shell_SecondaryTrayWnd"))
+            return FALSE;
+    }
+
     GetWindowThreadProcessId(fg, &p);
     if (!p || p == GetCurrentProcessId()) return FALSE;
     *pid = p;
@@ -908,11 +933,19 @@ static void SetGuard(BOOL on)
 }
 
 /* Called once per timer tick, after the on/off state has been read. */
-static void GuardTick(BOOL now, BOOL changed)
+/* The guard keeps its own "last seen" state rather than sharing g_bActive
+   with the tray icon.  Sharing it was a bug: anything that refreshed the icon
+   first - the context menu reading the state, or one of our own menu commands -
+   swallowed the transition, so the guard either missed a game switching the
+   saver off or mistook our own change for someone else's. */
+static void GuardTick(BOOL now)
 {
     DWORD pid = 0;
     char  name[64];
     BOOL  full = FALSE;
+    BOOL  changed = (now != g_guardLast);
+
+    g_guardLast = now;
 
     if (changed) {
         if (now) {
@@ -965,7 +998,8 @@ static void GuardTick(BOOL now, BOOL changed)
             ForgetSuspect();
             if (g_bGuard && g_bIntended && !SaverIsActive()) {
                 SaverSetActive(TRUE);       /* put it back */
-                g_bActive = TRUE;
+                g_bActive   = TRUE;
+                g_guardLast = TRUE;
                 TrayUpdate();
             }
         }
@@ -979,16 +1013,38 @@ static void GuardTick(BOOL now, BOOL changed)
         SetIntended(FALSE);
 }
 
-static void RefreshState(BOOL force)
+/* Keep the icon in step with the setting.  Touches nothing the guard uses. */
+static void SyncIcon(void)
 {
-    BOOL now     = SaverIsActive();
-    BOOL changed = (now != g_bActive);
-
-    if (force || changed) {
+    BOOL now = SaverIsActive();
+    if (now != g_bActive) {
         g_bActive = now;
         TrayUpdate();
     }
-    GuardTick(now, changed);
+}
+
+static void RefreshState(BOOL force)
+{
+    BOOL now = SaverIsActive();
+
+    if (force || now != g_bActive) {
+        g_bActive = now;
+        TrayUpdate();
+    }
+    GuardTick(now);
+}
+
+/* A change we make ourselves.  The icon follows it, and the guard is told the
+   new state up front so it cannot mistake it for another program switching
+   the screen saver off - it used to, attributing it to whatever window had
+   the focus after the menu closed. */
+static void ApplyOwnChange(BOOL on)
+{
+    SetIntended(on);
+    SaverSetActive(on);
+    g_guardLast = SaverIsActive();
+    g_bActive   = g_guardLast;
+    TrayUpdate();
 }
 
 /* ======================================================================= */
@@ -1538,7 +1594,7 @@ static void ShowContextMenu(void)
     POINT  pt;
 
     EnumSavers();
-    g_bActive = SaverIsActive();
+    SyncIcon();
 
     hMenu = LoadMenuA(g_hInst, MAKEINTRESOURCEA(
                 g_bEnglish ? IDR_MENU_EN : IDR_MENU_DE));
@@ -1765,12 +1821,8 @@ static void OnCommand(UINT id)
 
     switch (id) {
     case IDM_START_DEFAULT: StartDefaultSaver();            break;
-    case IDM_ENABLE:        SetIntended(TRUE);
-                            SaverSetActive(TRUE);
-                            RefreshState(TRUE);             break;
-    case IDM_DISABLE:       SetIntended(FALSE);
-                            SaverSetActive(FALSE);
-                            RefreshState(TRUE);             break;
+    case IDM_ENABLE:        ApplyOwnChange(TRUE);           break;
+    case IDM_DISABLE:       ApplyOwnChange(FALSE);          break;
     case IDM_DISPLAY:       OpenDisplayProperties();        break;
     case IDM_AUTOSTART:     AutostartSet(!AutostartEnabled()); break;
     case IDM_ABOUT:         ShowAbout();                    break;
@@ -1886,6 +1938,7 @@ void __cdecl WinMainCRTStartup(void)
 
     g_bActive   = SaverIsActive();
     g_bIntended = g_bActive;   /* whatever it is at startup is what is wanted */
+    g_guardLast = g_bActive;
     TrayAdd();          /* if this is dropped, the timer notices and retries */
 
     while (GetMessageA(&msg, NULL, 0, 0) > 0) {

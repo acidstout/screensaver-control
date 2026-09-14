@@ -4,7 +4,7 @@ A native Win32 tray applet that shows and controls the state of the default
 Windows screen saver. 32-bit, no C runtime, no external dependencies —
 runs on every 32-bit Windows from **Windows 95** through **Windows 11**.
 
-`build\scrctl.exe` — **92,160 bytes**, of which ~62 KB is the two icons;
+`build\scrctl.exe` — **91,136 bytes**, of which ~62 KB is the two icons;
 code + data is about 13 KB.
 
 ## Features
@@ -221,9 +221,32 @@ Both cost time to discover, and neither is obvious:
   `ScreenSaveActive` directly leaves the getter reporting the old value
   indefinitely. The live per-session value is what decides whether Windows
   starts the saver; the registry is only read at logon. The two can disagree.
-- **`SPI_SETSCREENSAVEACTIVE` fails with 329 while a screen saver is running**,
-  and `SPIF_SENDWININICHANGE` makes it return error 1460 (`ERROR_TIMEOUT`) from
-  the broadcast even when it succeeded. Do not read failure into either.
+- **`SPI_SETSCREENSAVEACTIVE` fails with 329 (`ERROR_OPERATION_IN_PROGRESS`)
+  once the idle timeout has fired — until there is user input again.** Killing
+  the running `.scr` does not clear it and the "screen saver running" flag
+  reads 0 meanwhile; a single zero-distance mouse event does. Separately,
+  `SPIF_SENDWININICHANGE` makes a *successful* call return error 1460
+  (`ERROR_TIMEOUT`) from the broadcast. Do not read failure into either.
+- **Test through C, never PowerShell P/Invoke.** Reading `GetLastError`
+  through a separate `DllImport` yields a stale value; that alone produced a
+  bogus "329 everywhere" diagnosis here.
+
+### Guard and icon keep separate state
+
+The guard used to detect changes by comparing against `g_bActive`, the same
+variable the tray icon uses. Anything that refreshed the icon first swallowed
+the transition: the context menu reading the state could make the guard miss
+a game switching the saver off, and our own *Ein-/Ausschalten* was seen as
+another program doing it — attributed to whatever window had the focus after
+the menu closed. The guard now keeps `g_guardLast`, our own menu commands go
+through `ApplyOwnChange`, which tells the guard the new state up front, and
+the context menu uses `SyncIcon`, which updates the icon without touching the
+guard.
+
+The desktop (`Progman` / `WorkerW`) is also excluded as a foreground app. It is
+owned by Explorer and exactly the size of the monitor, so it read as a
+full-screen application — and Explorer never exits, so it would have been
+tracked as a suspect forever.
 
 ## Language handling
 
@@ -301,6 +324,14 @@ two separate mistakes here made the program run invisibly:
 2. **`NIM_ADD` returning TRUE is not proof the icon exists**, and a lost icon
    used to be permanent — the only retry path ran when the screen saver's
    on/off state changed, which might be never.
+
+3. **`NIM_ADD` cannot recover an icon the shell still holds.** A single
+   transient `NIM_MODIFY` failure (Explorer slow to answer, e.g. under a game)
+   used to clear `g_bIconOk`, and the recovery was `NIM_ADD` — which fails
+   every time while the icon exists, so the icon and tooltip froze for the
+   rest of the session. `TrayAdd` now does `NIM_ADD || NIM_MODIFY`. A probe
+   reproducing that exact state showed the old recovery frozen on every tick
+   and the new one recovering on the first.
 
 So `TrayEnsure()` runs on every 2 s timer tick and: re-adds the icon whenever
 `g_bIconOk` is clear; otherwise probes with `NIM_MODIFY` on *every* tick until
